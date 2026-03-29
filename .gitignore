@@ -1,0 +1,29 @@
+# Streamlit secrets (NEVER COMMIT THIS!)
+.streamlit/secrets.toml
+
+# Environment variables
+.env
+
+# Local data and old database files
+data/
+*.db
+visualstats.db
+
+# Temporary scripts
+rewrite_*.py
+
+# Python caching & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# OS generated files
+.DS_Store
+Thumbs.db
