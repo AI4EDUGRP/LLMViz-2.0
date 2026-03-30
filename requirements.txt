@@ -55,7 +55,7 @@ patsy
 pillow
 plotly
 plotnine
-protobuf
+protobuf<=3.20.3
 pyarrow
 pyasn1
 pyasn1_modules
@@ -86,7 +86,7 @@ smmap
 sniffio
 starlette
 statsmodels
-streamlit
+streamlit>=1.42.0
 streamlit-option-menu
 tenacity
 tiktoken
