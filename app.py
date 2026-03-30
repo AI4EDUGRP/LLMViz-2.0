@@ -32,6 +32,9 @@ except Exception:
 if not API_KEY:
     st.error("Missing OpenAI API Key. Please set OPENAI_API_KEY in your environment.")
     st.stop()
+    
+# Many third-party libraries (like LIDA) rely on this being in os.environ
+os.environ["OPENAI_API_KEY"] = API_KEY
 
 # Professional Styling
 st.markdown("""
@@ -1091,13 +1094,21 @@ def run_viz_generator():
             
 
             with st.spinner("Generating final chart..."):
-                final_chart = lida.edit(
+                final_charts_list = lida.edit(
                     code=charts[0].code,
                     summary=summary,
                     instructions=base_instructions,
                     library="seaborn",
                     textgen_config=textgen_config
-                )[0]
+                )
+                
+                if final_charts_list and len(final_charts_list) > 0:
+                    final_chart = final_charts_list[0]
+                else:
+                    # Fallback to the initial chart if LIDA edit engine fails
+                    st.warning("⚠️ Could not apply all stylistic refinements. Displaying the base chart.")
+                    final_chart = charts[0]
+                    
             img = base64_to_image(final_chart.raster)
             chart_placeholder.image(img, use_container_width=True)
             st.session_state["chart_code"] = final_chart.code
@@ -1173,13 +1184,17 @@ def run_viz_generator():
                     with st.spinner("Generating final chart..."):
                         chart_code = st.session_state.get("chart_code")
                         instr = ["Keep all the properties of the existing chart, additionally add:"] + [extra]
-                        updated = lida.edit(
+                        updated_list = lida.edit(
                             code=chart_code,
                             summary=summary,
                             instructions=instr,
                             library="seaborn",
                             textgen_config=textgen_config
-                        )[0]
+                        )
+                        if not updated_list:
+                            st.warning("⚠️ Refinement failed. Please try phrasing your request differently.")
+                            st.stop()
+                        updated = updated_list[0]
                         refine_response_time = time.time() - refine_start_time
                         updated_img = base64_to_image(updated.raster)
                         chart_placeholder.image(updated_img, use_container_width=True)
