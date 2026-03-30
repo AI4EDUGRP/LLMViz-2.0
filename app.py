@@ -24,7 +24,11 @@ img = Image.open('imggg.png')
 st.set_page_config(initial_sidebar_state="expanded", layout="wide", page_title="VisualStats", page_icon=img)
 
 load_dotenv()
-API_KEY = os.getenv("OPENAI_API_KEY")
+try:
+    API_KEY = st.secrets["OPENAI_API_KEY"]
+except Exception:
+    API_KEY = os.getenv("OPENAI_API_KEY")
+
 if not API_KEY:
     st.error("Missing OpenAI API Key. Please set OPENAI_API_KEY in your environment.")
     st.stop()
