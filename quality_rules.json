@@ -1,0 +1,42 @@
+{
+    "VISUALIZATION_QUALITY_RULES": {
+        "labels_and_titles": {
+            "x_axis_label_present": true,
+            "x_axis_label_complete_and_clearly_identified": true,
+            "y_axis_label_present": true,
+            "y_axis_label_complete_and_clearly_identified": true,
+            "title_present": true,
+            "alignment": "center"
+        },
+        "chart_size": {
+            "min_width": 6,
+            "min_height": 4,
+            "max_width": 16,
+            "max_height": 10
+        },
+        "colors": {
+            "distinct_colors": true,
+            "accessible_palette": true,
+            "avoid_red_green_conflict": true
+        },
+        "readability": {
+            "font_size_min": 10,
+            "font_size_max": 20,
+            "clear_font": true
+        },
+        "axis_scaling": {
+            "ticks_present": true,
+            "consistent_intervals": true
+        },
+        "legend": {
+            "legend_present": true,
+            "position": [
+                "top",
+                "right",
+                "bottom",
+                "left"
+            ],
+            "clear_labels": true
+        }
+    }
+}

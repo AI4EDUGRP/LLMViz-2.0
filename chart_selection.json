@@ -1,0 +1,46 @@
+{
+  "VALIDATION_RULES": {
+    "Categorical": {
+      "Comparison": [
+        "Bar/Column Chart",
+        "Grouped Bar Chart",
+        "Lollipop (Dot) Chart"
+      ],
+      "Composition": [
+        "Pie Chart",
+        "Donut Chart",
+        "Stacked Bar Chart",
+        "Treemap",
+        "Sunburst Chart"
+      ]
+    },
+    "Time Series": {
+      "Trend": [
+        "Line Chart",
+        "Area Chart"
+      ],
+      "Composition Over Time": [
+        "Stacked Area Chart"
+      ]
+    },
+    "Numerical": {
+      "Distribution": [
+        "Histogram",
+        "Density Curve"
+      ],
+      "Comparison of Distributions": [
+        "Box Plot",
+        "Violin Plot"
+      ]
+    },
+    "Relationship": {
+      "Correlation": [
+        "Scatter Plot",
+        "Bubble Chart"
+      ],
+      "Matrix": [
+        "Heatmap"
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+Unnamed__0,__ANSWER___Overview___Study_at_a_Glance,Unnamed__2,Unnamed__3,Unnamed__4,Unnamed__5
+,   ▸ Purpose of this workbook: Each sheet directly answers one of the 6 research questions about student follow-up behaviour in the VR sorting algorithm platform.,,,,
+,"  ▸ 18 students: Akhil, Anusha, Bindu, Gautam, Karthik, Karthikeya, Meghana, Phani, Priya, Radha, Revanth, Rushitha, Sarath, ShivRam, Swetha, Venkat, Vignesh, Yashwanth.",,,,
+,"  ▸ 271 total follow-up questions: Across 308 required question slots. 45 slots (14.6%) had mixed follow-up type sequences. 143 were CL, 58 EX, 35 SM, 21 SA, 6 CO, 8 other.",,,,
+,  ▸ Key finding: Implementation stage drives the most follow-up activity; Reflection the least. Students are most exploratory during Analyzing and most confused during Exploration.,,,,
+,  ▸ How to navigate: Go to each Q-sheet for full data. The summary answer box at the top of each sheet gives the direct answer. Scroll down for the full tables and heatmaps.,,,,
+,,,,,
+,,,,,
+,,,,,
+,,,,,
+,,,,,
+,VR Platform Study — Analytical Framework,,,,
+,,,,,
+,How This Workbook Answers Your Professor's 6 Questions,,,,
+,,,,,
+,#,Research Question,Sheet,Method,Key Metrics
+,1,Frequency of Follow-ups & Follow-up Category Frequency,Q1 Follow-up Frequency,Count of FU per student per stage; breakdown by type code,"Total FU, EX/CL/CO/SM/SA counts, FU Rate %"
+,2,Change in Follow-up Types across Required Questions — and does it relate to the Required Question Type?,Q2 Type Sequence & Change,Track type sequence per required question; flag variety; categorise required question by cognitive level,"Type Sequence, Has_Type_Variety, Req_Type"
+,3,Number of Conversational Turns per Sub-category,Q3 Conversational Turns,Sum of (required Q + all its FUs) as turns per stage,"Conv_Turns, Avg FU per Q"
+,4,Time Spent per Sub-category,Q4 Time Estimate,Each conversation turn estimated at 45–90 seconds; stage totals derived from turn counts,Est_Time_Min_min / Est_Time_Max_min
+,5,Stage vs Follow-up Pattern Association — at what stage do students do more or change more?,Q5 Stage Association,Group FU count & diversity by stage; compare across algorithms,"FU_Rate_pct, Avg_FU, Diversity, EX/CL breakdown"
+,6,NPC Response Alignment — does the NPC answer match student thought?,Q6 NPC Alignment,SA (Seeking Approval) + SM (Seeking More) codes signal alignment-testing; EX+CL codes signal divergence or confusion,"Align_pct, Diverge_pct"
+,,,,,
+,Follow-up Type Code Definitions,,,,
+,Code,Name,Meaning,,
+,EX,Exploration,Student asks a new question beyond the prompt — branching out,,
+,CL,Clarification,Student asks the NPC to clarify or re-explain something,,
+,CO,Correction,Student corrects themselves or the NPC; refines understanding,,
+,SM,Seeking More,"Student asks the NPC to expand, give more detail, or go deeper",,
+,SA,Seeking Approval,Student asks the NPC to confirm/validate their understanding,,

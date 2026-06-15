@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-15T01:26:34Z",
+  "title": "Design System: VisualStats",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Insight Blue" },
+      "secondary": { "role": "secondary", "displayName": "Growth Green" }
+    },
+    "shadows": [
+      { "name": "card-lift", "value": "0 2px 8px rgba(0,0,0,0.08)", "purpose": "Standard resting elevation for all cards and containers." },
+      { "name": "hover-lift", "value": "0 8px 20px rgba(0, 102, 204, 0.3)", "purpose": "Tactile hover state for primary buttons." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main action button with gradient and hover lift.",
+      "html": "<button class=\"ds-btn-primary\">Evaluate Visualization</button>",
+      "css": ".ds-btn-primary { background: linear-gradient(135deg, #0066CC, #0052A3); color: white; padding: 10px 20px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; transition: all 0.3s ease; } .ds-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0, 102, 204, 0.3); }"
+    },
+    {
+      "name": "Standard Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Lifted container for content grouping.",
+      "html": "<div class=\"ds-card\"><h4>Card Title</h4><p>Card content goes here.</p></div>",
+      "css": ".ds-card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); border: 1px solid #E2E8F0; margin-bottom: 15px; font-family: system-ui, sans-serif; } .ds-card h4 { color: #0052A3; margin-top: 0; margin-bottom: 10px; font-weight: 700; } .ds-card p { margin: 0; color: #1E293B; line-height: 1.6; }"
+    },
+    {
+      "name": "Section Header",
+      "kind": "custom",
+      "refersTo": "section-header",
+      "description": "Gradient header for major sections.",
+      "html": "<div class=\"ds-section-header\">Data Overview</div>",
+      "css": ".ds-section-header { background: linear-gradient(135deg, #0066CC, #0052A3); color: white; padding: 20px; border-radius: 10px; font-size: 18px; font-weight: 700; margin: 20px 0; font-family: system-ui, sans-serif; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Data Studio",
+    "overview": "This system is modern, breezy, and approachable. It strikes a perfect balance between professionalism and ease-of-use, transforming complex data tasks into a clean, intuitive experience. The aesthetic philosophy prioritizes clarity over density, ensuring that the generated visualization is always the central focus without overwhelming the user with unnecessary visual clutter.\n\nWe explicitly reject overly crowded or dense dashboards and interfaces that dump too much information on the screen at once (as seen in traditional enterprise BI tools).",
+    "keyCharacteristics": [
+      "Approachable Professionalism: A clean, airy layout that doesn't intimidate.",
+      "Clear Hierarchy: Content is lifted into distinct cards to guide the eye.",
+      "Tactile Responses: Interactive elements respond clearly to user action."
+    ],
+    "rules": [
+      { "name": "The Background Canvas Rule", "body": "The main app background is always Breezy Background (#F8FAFC), allowing stark white cards to pop forward.", "section": "colors" },
+      { "name": "The Legibility Rule", "body": "Never use weights below 400 for structural text, ensuring crisp rendering across devices.", "section": "typography" },
+      { "name": "The Hover Feedback Rule", "body": "Interactive elements must provide clear visual feedback. Buttons should lift and intensify in color when hovered.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do rely on the chat interface as the primary driver of changes.",
+      "Do ensure the generated visualization remains the hero of the screen.",
+      "Do use box-shadow: 0 2px 8px rgba(0,0,0,0.08) to lift white cards off the #F8FAFC background.",
+      "Do provide tactile hover states (translateY(-2px)) on all primary buttons."
+    ],
+    "donts": [
+      "Don't create overly crowded or dense dashboards (e.g., traditional enterprise BI tools).",
+      "Don't dump too much information on the screen at once.",
+      "Don't use dark mode or neon accents that conflict with the breezy, approachable feel."
+    ]
+  }
+}

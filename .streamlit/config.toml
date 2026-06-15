@@ -1,0 +1,13 @@
+[server]
+maxUploadSize = 400
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base="light"
+primaryColor="#0066CC"
+backgroundColor="#F8FAFC"
+secondaryBackgroundColor="#FFFFFF"
+textColor="#1E293B"
+font="sans serif"
