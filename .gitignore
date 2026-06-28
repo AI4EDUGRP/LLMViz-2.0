@@ -11,6 +11,7 @@ visualstats.db
 .dev_session.json
 msgs.json
 user_code_extracted.txt
+.agent/
 
 # Node dependencies and generated frontend build output
 node_modules/
