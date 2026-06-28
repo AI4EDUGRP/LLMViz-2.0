@@ -8,9 +8,20 @@
 data/
 *.db
 visualstats.db
+.dev_session.json
+msgs.json
+user_code_extracted.txt
+
+# Node dependencies and generated frontend build output
+node_modules/
+magic_ui/node_modules/
+magic_ui/dist/
 
 # Temporary scripts
 rewrite_*.py
+output.csv
+output.xlsx
+output_image.png
 
 # Python caching & bytecode
 __pycache__/

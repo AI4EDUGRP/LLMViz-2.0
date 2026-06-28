@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 import uuid
 import os
 
-DB_PATH = "visualstats.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visualstats.db")
 
 
 class DatabaseManager:
@@ -375,6 +375,22 @@ class DatabaseManager:
         conn.close()
         return results
 
+    def get_user_datasets(self, user_id: str, limit: int = 10) -> List[Dict]:
+        """Get datasets uploaded by a user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT dataset_id, dataset_name, file_type, file_size_bytes, upload_time 
+            FROM datasets 
+            WHERE user_id = ? 
+            ORDER BY upload_time DESC 
+            LIMIT ?
+        """, (user_id, limit))
+        
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return results
+
     def get_dashboard_stats(self) -> Dict:
         """Get platform statistics for dashboard."""
         conn = self.get_connection()
@@ -389,6 +405,10 @@ class DatabaseManager:
         # Total interactions
         cursor.execute("SELECT COUNT(*) as count FROM interactions")
         stats['total_interactions'] = cursor.fetchone()['count']
+
+        # Total chat queries (all users, all time)
+        cursor.execute("SELECT COUNT(*) as count FROM ai_conversations")
+        stats['total_conversations'] = cursor.fetchone()['count']
         
         # Total visualizations
         cursor.execute("SELECT COUNT(*) as count FROM visualizations")

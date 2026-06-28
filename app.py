@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import html
 import pandas as pd
 import xml.etree.ElementTree as ET
 from io import BytesIO
@@ -17,6 +18,8 @@ from chat_storage import (
     save_chat_message, save_generated_image, save_dataset_summary,
     get_chat_history, get_session_statistics, save_chart_refinement
 )
+from chart_generation import UploadedDatasetError, build_fast_chart_goal, load_dataset_csv
+from design_system import inject_design_system
 import time
 
 # --------------------- Environment Setup ---------------------
@@ -36,122 +39,18 @@ if not API_KEY:
 # Many third-party libraries (like LIDA) rely on this being in os.environ
 os.environ["OPENAI_API_KEY"] = API_KEY
 
+
+inject_design_system()
+
+
 # Professional Styling
-st.markdown("""
-    <style>
-        /* Color scheme */
-        :root {
-            --primary: #0066CC;
-            --primary-dark: #0052A3;
-            --secondary: #10B981;
-            --danger: #EF4444;
-            --warning: #F59E0B;
-            --light: #F8FAFC;
-            --border: #E2E8F0;
-            --text: #1E293B;
-            --text-secondary: #64748B;
-        }
-        
-        .stApp {
-            background-color: #F8FAFC;
-        }
-        
-        /* Main content area */
-        .stMain {
-            background-color: #F8FAFC;
-        }
-        
-        /* Headers */
-        h1, h2, h3 {
-            color: #1E293B;
-            font-weight: 700;
-        }
-        
-        /* Section headers */
-        .section-header {
-            background: linear-gradient(135deg, #0066CC, #0052A3);
-            color: white !important;
-            padding: 20px;
-            border-radius: 10px;
-            font-size: 18px;
-            font-weight: 700;
-            margin: 20px 0;
-        }
-        
-        /* Cards & Containers */
-        .card {
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            border: 1px solid #E2E8F0;
-            margin-bottom: 15px;
-        }
-        
-        /* Buttons */
-        .stButton > button {
-            border-radius: 8px;
-            border: none;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            background: linear-gradient(135deg, #0066CC, #0052A3);
-            color: white !important;
-        }
-        
-        .stButton > button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px rgba(0, 102, 204, 0.3);
-        }
-        
-        /* File uploader */
-        .stFileUploader {
-            border-radius: 8px;
-            border: 2px dashed #0066CC;
-        }
-        
-        /* Text input & Select */
-        .stTextInput, .stSelectbox, .stDateInput {
-            border-radius: 8px;
-        }
-        
-        /* Tabs */
-        .stTabs [data-baseweb="tab"] {
-            height: 50px;
-            background-color: white;
-            border-bottom: 2px solid #E2E8F0;
-            font-weight: 600;
-            color: #64748B;
-        }
-        
-        .stTabs [aria-selected="true"] {
-            color: #0066CC;
-            border-bottom: 3px solid #0066CC !important;
-        }
-        
-        /* Metric cards */
-        .stMetric {
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
-        
-        /* Alert boxes */
-        .stAlert {
-            border-radius: 8px;
-            padding: 15px 20px;
-        }
-        
-        /* Sidebar */
-        .stSidebar {
-            background: white;
-            border-right: 1px solid #E2E8F0;
-        }
-    </style>
-""", unsafe_allow_html=True)
+
 
 # Initialize clients
 client = OpenAI(api_key=API_KEY)
+import tempfile
+import os
+os.environ["LOCALAPPDATA"] = os.path.join(tempfile.gettempdir(), "lida_appdata")
 lida = Manager(text_gen=llm("openai"))
 textgen_config = TextGenerationConfig(n=1, temperature=0.2, model="gpt-4o", use_cache=True)
 validated = ""
@@ -159,50 +58,126 @@ validated = ""
 # --------------------- Authentication Check ---------------------
 initialize_data_structure()
 
+# Development Auth Persistence (prevents needing to login after every Ctrl+F5)
+import json
+import os
+DEV_SESSION_FILE = ".dev_session.json"
+
 if "is_authenticated" not in st.session_state:
     st.session_state.is_authenticated = False
+    
+    # Try to load from persistent dev session
+    if os.path.exists(DEV_SESSION_FILE):
+        try:
+            with open(DEV_SESSION_FILE, "r") as f:
+                saved_session = json.load(f)
+                st.session_state.is_authenticated = saved_session.get("is_authenticated", False)
+                if "user" in saved_session:
+                    st.session_state.user = saved_session["user"]
+                if "role" in saved_session:
+                    st.session_state.role = saved_session["role"]
+                if "user_id" in saved_session:
+                    st.session_state.user_id = saved_session["user_id"]
+        except Exception:
+            pass
 
-@st.dialog("Welcome to VisualStats", width="large")
-def auth_dialog():
-    st.markdown("<h3 style='text-align: center; color: #1E293B;'>Secure Access</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #64748B;'>Select an access method below to continue.</p>", unsafe_allow_html=True)
+# Helper to save session when user logs in (called in auth logic)
+def save_dev_session():
+    try:
+        with open(DEV_SESSION_FILE, "w") as f:
+            json.dump({
+                "is_authenticated": st.session_state.get("is_authenticated", False),
+                "user": st.session_state.get("user"),
+                "role": st.session_state.get("role"),
+                "user_id": st.session_state.get("user_id"),
+            }, f)
+    except Exception:
+        pass
+
+# Smooth dark-to-light transition overlay to prevent white flash after login
+if st.session_state.is_authenticated:
+    st.markdown("""
+    <style>
+        .page-transition-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100vw; height: 100vh;
+            background: #F8FAFC;
+            z-index: 999999;
+            pointer-events: none;
+            animation: fadeOutOverlay 0.6s ease-out forwards;
+        }
+        @keyframes fadeOutOverlay {
+            0% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+    </style>
+    <div class="page-transition-overlay"></div>
+    """, unsafe_allow_html=True)
+
+if not st.session_state.is_authenticated:
+    # Hide Streamlit UI to make it full screen
+    st.markdown("""
+    <style>
+        header {display:none !important;}
+        .stSidebar {display:none !important;}
+        [data-testid="stSidebar"] {display:none !important;}
+        [data-testid="stHeader"] {display:none !important;}
+        /* Hide the 'Running...' status widget */
+        [data-testid="stStatusWidget"] {display:none !important;}
+        /* Hide any Streamlit loading spinners */
+        .stSpinner {display:none !important;}
+        .stApp {background-color: black !important;}
+        .stMainBlockContainer {padding: 0 !important; max-width: 100% !important;}
+        /* Ensure the iframe is full screen */
+        iframe {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            z-index: 999999 !important;
+            border: none !important;
+            background-color: transparent !important;
+            /* Prevent Streamlit from applying opacity or grayscale filters during load */
+            opacity: 1 !important;
+            filter: none !important;
+        }
+        /* Hide Streamlit's translucent layover div that is placed over components while running */
+        iframe + div {
+            display: none !important;
+            opacity: 0 !important;
+            background: transparent !important;
+        }
+        /* Hide any element with stComponentLoading */
+        [data-testid="stComponentLoading"] {
+            display: none !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
     
-    st.write("")
-    tab1, tab2 = st.tabs(["👤 User Login", "🛡️ Admin Portal"])
+    from magic_wrapper import render_magic_auth
+    auth_data = render_magic_auth(key="magic_auth", error_message=st.session_state.get("auth_error", None))
     
-    with tab1:
-        st.markdown("<p style='color: #64748B;'>Sign in, register instantly with your PIN, or continue as guest.</p>", unsafe_allow_html=True)
-        username = st.text_input("Username", placeholder="Enter your username", key="user_name")
-        pin = st.text_input("4-Digit PIN", type="password", max_chars=4, placeholder="****", key="user_pin")
+    # Clear error after displaying once
+    if "auth_error" in st.session_state:
+        del st.session_state["auth_error"]
+    
+    if auth_data:
+        timestamp = auth_data.get("timestamp")
+        last_timestamp = st.session_state.get("last_auth_timestamp")
         
-        st.write("")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Login / Register", use_container_width=True, type="primary"):
-                if not username or not pin or len(pin) != 4 or not pin.isdigit():
-                    st.error("Please enter a username and a valid 4-digit PIN.")
-                else:
-                    from auth import authenticate_user, create_session
-                    result = authenticate_user(username, pin)
-                    if isinstance(result, str):
-                        st.error(result)  # e.g., Invalid PIN or purely alphabetical
-                    else:
-                        st.session_state.is_authenticated = True
-                        st.session_state.user_info = result
-                        st.session_state.user_id = result.get("user_id", "unknown")
-                        st.session_state.username = result.get("username", "unknown")
-                        st.session_state.role = result.get("role", "user")
-                        st.session_state.session_token = create_session(st.session_state.user_id, result.get("username", "unknown"), st.session_state.role)
-                        
-                        if result.get("is_new"):
-                            st.session_state.auth_message = f"Welcome! Account newly created for {result.get('username')}. 🎉"
-                        else:
-                            st.session_state.auth_message = f"Welcome back, {result.get('username')}! 👋"
-                        
-                        st.rerun()
-        with col2:
-            if st.button("Continue as Guest", use_container_width=True):
-                from auth import create_guest_user, create_session
+        if timestamp and timestamp != last_timestamp:
+            st.session_state.last_auth_timestamp = timestamp
+            action = auth_data.get("action")
+            username = auth_data.get("username", "")
+            pin = auth_data.get("pin", "")
+            master_code = auth_data.get("master_code", "")
+            is_admin = auth_data.get("is_admin", False)
+            
+            from auth import authenticate_user, create_session, create_guest_user, login_admin, register_admin
+            
+            if action == "guest":
                 guest_user = create_guest_user()
                 st.session_state.is_authenticated = True
                 st.session_state.user_info = guest_user
@@ -212,65 +187,76 @@ def auth_dialog():
                 st.session_state.session_token = create_session(st.session_state.user_id, guest_user.get("username"), "guest")
                 st.session_state.auth_message = "Logged in as Guest. Your session data will not be permanently saved. 🕵️‍♂️"
                 st.rerun()
-
-    with tab2:
-        st.markdown("<p style='color: #64748B;'>Enter your Admin credentials and the Master Code to access the dashboard.</p>", unsafe_allow_html=True)
-        admin_user = st.text_input("Admin Username", placeholder="Enter admin username", key="admin_user_input")
-        admin_pin = st.text_input("Admin 4-Digit PIN", type="password", max_chars=4, placeholder="****", key="admin_pin_input")
-        master_code = st.text_input("Admin Master Code", type="password", placeholder="Enter 6-digit master code", key="admin_master_code")
-        
-        st.write("")
-        col3, col4 = st.columns(2)
-        with col3:
-            if st.button("Login as Admin", use_container_width=True, type="primary"):
-                if not admin_user or not admin_pin or len(admin_pin) != 4 or not admin_pin.isdigit():
-                    st.error("Please enter a username and a valid 4-digit PIN.")
-                elif not master_code:
-                    st.error("Master code is required to login as Admin.")
+                
+            elif action == "login":
+                if not username or not pin or len(pin) != 4 or not pin.isdigit():
+                    st.session_state.auth_error = "Please enter a username and a valid 4-digit PIN."
+                    st.rerun()
+                elif is_admin:
+                    if not master_code:
+                        st.session_state.auth_error = "Master code is required to login as Admin."
+                        st.rerun()
+                    else:
+                        result = login_admin(username, pin, master_code)
+                        if isinstance(result, str):
+                            st.session_state.auth_error = result
+                            st.rerun()
+                        else:
+                            st.session_state.is_authenticated = True
+                            st.session_state.user_info = result
+                            st.session_state.user_id = result.get("user_id")
+                            st.session_state.username = result.get("username")
+                            st.session_state.role = "admin"
+                            st.session_state.session_token = create_session(st.session_state.user_id, result.get("username"), "admin")
+                            st.session_state.auth_message = f"Welcome back, Admin {result.get('username')}! 🛡️"
+                            save_dev_session()
+                            st.rerun()
                 else:
-                    from auth import login_admin, create_session
-                    result = login_admin(admin_user, admin_pin, master_code)
+                    result = authenticate_user(username, pin)
                     if isinstance(result, str):
-                        st.error(result)
+                        st.session_state.auth_error = result
+                        st.rerun()
                     else:
                         st.session_state.is_authenticated = True
                         st.session_state.user_info = result
-                        st.session_state.user_id = result.get("user_id")
-                        st.session_state.username = result.get("username")
-                        st.session_state.role = "admin"
-                        st.session_state.session_token = create_session(st.session_state.user_id, result.get("username"), "admin")
-                        st.session_state.auth_message = f"Welcome back, Admin {result.get('username')}! 🛡️"
+                        st.session_state.user_id = result.get("user_id", "unknown")
+                        st.session_state.username = result.get("username", "unknown")
+                        st.session_state.role = result.get("role", "user")
+                        st.session_state.session_token = create_session(st.session_state.user_id, result.get("username", "unknown"), st.session_state.role)
+                        if result.get("is_new"):
+                            st.session_state.auth_message = f"Welcome! Account newly created for {result.get('username')}. 🎉"
+                        else:
+                            st.session_state.auth_message = f"Welcome back, {result.get('username')}! 👋"
+                        save_dev_session()
                         st.rerun()
-        with col4:
-            if st.button("Register New Admin", use_container_width=True):
-                if not admin_user or not admin_pin or len(admin_pin) != 4 or not admin_pin.isdigit():
-                    st.error("Please enter a username and a valid 4-digit PIN.")
-                elif not master_code:
-                    st.error("Master code is required to register an admin.")
+                        
+            elif action == "register":
+                if not is_admin:
+                    pass
                 else:
-                    from auth import register_admin, create_session
-                    result = register_admin(admin_user, admin_pin, master_code)
-                    if result is None:
-                        st.error("Registration failed. Invalid master code or username already taken.")
-                    else:
-                        st.success("Admin registered successfully! Logging in...")
-                        st.session_state.is_authenticated = True
-                        st.session_state.user_info = result
-                        st.session_state.user_id = result.get("admin_id")
-                        st.session_state.username = result.get("admin_username")
-                        st.session_state.role = "admin"
-                        st.session_state.session_token = create_session(st.session_state.user_id, result.get("admin_username"), "admin")
-                        st.session_state.auth_message = f"Admin account '{result.get('admin_username')}' created. Welcome to the dashboard! 🛡️"
+                    if not username or not pin or len(pin) != 4 or not pin.isdigit():
+                        st.session_state.auth_error = "Please enter a username and a valid 4-digit PIN."
                         st.rerun()
+                    elif not master_code:
+                        st.session_state.auth_error = "Master code is required to register an admin."
+                        st.rerun()
+                    else:
+                        result = register_admin(username, pin, master_code)
+                        if result is None:
+                            st.session_state.auth_error = "Registration failed. Invalid master code or username already taken."
+                            st.rerun()
+                        else:
+                            st.success("Admin registered successfully! Logging in...")
+                            st.session_state.is_authenticated = True
+                            st.session_state.user_info = result
+                            st.session_state.user_id = result.get("admin_id")
+                            st.session_state.username = result.get("admin_username")
+                            st.session_state.role = "admin"
+                            st.session_state.session_token = create_session(st.session_state.user_id, result.get("admin_username"), "admin")
+                            st.session_state.auth_message = f"Admin account '{result.get('admin_username')}' created. Welcome to the dashboard! 🛡️"
+                            save_dev_session()
+                            st.rerun()
 
-if not st.session_state.is_authenticated:
-    # Add a blurred background effect or a clean overlay if desired
-    st.markdown("""
-    <style>
-        .stMain { filter: blur(5px); pointer-events: none; }
-    </style>
-    """, unsafe_allow_html=True)
-    auth_dialog()
     st.stop()
     
 # Show success toast from login if exists
@@ -280,6 +266,788 @@ if "auth_message" in st.session_state:
 
 # --------------------- Database Initialization ---------------------
 db = get_db()
+
+
+def go_to_menu(label: str, index: int):
+    """Programmatically switch Streamlit's option menu on the next rerun."""
+    st.session_state.menu_choice = label
+    st.session_state.force_menu_index = index
+    st.rerun()
+
+
+def handle_nav_event(nav_event):
+    """Handle navigation events emitted from React components."""
+    if not nav_event:
+        return
+
+    action = nav_event.get("action")
+    target = nav_event.get("target")
+    timestamp = nav_event.get("timestamp")
+    last_ts = st.session_state.get("last_nav_timestamp")
+
+    if not timestamp or timestamp == last_ts:
+        return
+
+    st.session_state.last_nav_timestamp = timestamp
+    if action == "logout":
+        perform_logout()
+    elif action == "navigate" and target == "home":
+        go_to_menu("Home", 0)
+    elif action == "navigate" and target == "viz_generator":
+        go_to_menu("Viz Generator", 1)
+    elif action == "navigate" and target == "viz_evaluator":
+        go_to_menu("Viz Evaluator", 2)
+    elif action == "navigate" and target == "analytics_dashboard":
+        go_to_menu("Analytics Dashboard", 3)
+
+
+def perform_logout():
+    """End the auth session and return to the login screen."""
+    from auth import end_session
+
+    if st.session_state.get("session_id"):
+        finalize_session(
+            st.session_state.get("user_id") or st.session_state.get("admin_id"),
+            st.session_state.session_id,
+        )
+    if st.session_state.get("session_token"):
+        end_session(st.session_state.session_token)
+    st.session_state.clear()
+    if os.path.exists(DEV_SESSION_FILE):
+        try:
+            os.remove(DEV_SESSION_FILE)
+        except OSError:
+            pass
+    st.success("Logged out successfully!")
+    time.sleep(1)
+    st.rerun()
+
+
+def render_page_actions(active="home"):
+    """Dashboard-style top navigation shown on tool pages."""
+    import importlib
+    import magic_wrapper
+
+    magic_wrapper = importlib.reload(magic_wrapper)
+
+    nav_event = magic_wrapper.render_magic_page_nav(
+        active=active,
+        is_admin=st.session_state.get("role") == "admin",
+        key=f"page_nav_{active}",
+    )
+    handle_nav_event(nav_event)
+
+
+def inject_magic_page_styles(page_type: str):
+    """Premium SynthAI-inspired styling for Streamlit-native widgets on tool pages."""
+    accent = {
+        "generator": "#6d5bd0",
+        "evaluator": "#5b8c5a",
+        "analytics": "#6d5bd0",
+    }.get(page_type, "#6d5bd0")
+
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background: #fbfbfa !important;
+            overflow-x: hidden !important;
+        }}
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"] {{
+            display: none !important;
+        }}
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMain"],
+        .stMain {{
+            width: 100% !important;
+            max-width: 100vw !important;
+            margin: 0 !important;
+            background: #fbfbfa !important;
+            overflow-x: hidden !important;
+        }}
+        [data-testid="stAppViewContainer"] > section.main {{
+            width: 100% !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+        .stMainBlockContainer {{
+            max-width: 100% !important;
+            width: 100% !important;
+            padding-top: 0.5rem !important;
+            padding-left: 0 !important;
+            padding-right: 0 !important;
+            padding-bottom: 1.5rem !important;
+        }}
+        iframe[title="magic_hub.magic_hub"] {{
+            width: 100% !important;
+            max-width: 100% !important;
+            border: none !important;
+            display: block !important;
+            overflow: hidden !important;
+        }}
+        div[data-testid="stCustomComponentV1"] {{
+            width: 100% !important;
+            max-width: 100% !important;
+            overflow: hidden !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+        [data-testid="stVerticalBlock"] {{
+            gap: 0.65rem !important;
+        }}
+        .stMainBlockContainer > div > div:not([data-testid="stCustomComponentV1"]) {{
+            padding-left: clamp(1.5rem, 6vw, 5rem) !important;
+            padding-right: clamp(1.5rem, 6vw, 5rem) !important;
+        }}
+
+        /* Top page action buttons */
+        .stButton > button {{
+            border-radius: 14px !important;
+            border: 1px solid rgba(17, 24, 39, 0.10) !important;
+            background: rgba(255, 255, 255, 0.88) !important;
+            color: #111827 !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.08em !important;
+            text-transform: uppercase !important;
+            box-shadow: 0 10px 32px rgba(17, 24, 39, 0.06) !important;
+            transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease !important;
+        }}
+        .stButton > button:hover {{
+            transform: translateY(-1px) !important;
+            border-color: {accent}55 !important;
+            box-shadow: 0 16px 42px rgba(17, 24, 39, 0.10) !important;
+        }}
+        .stFormSubmitButton > button,
+        .stDownloadButton > button {{
+            border-radius: 14px !important;
+            border: 1px solid rgba(17, 24, 39, 0.10) !important;
+            box-shadow: 0 10px 32px rgba(17, 24, 39, 0.06) !important;
+            font-weight: 700 !important;
+        }}
+        .stFormSubmitButton > button[kind="primary"],
+        .stButton > button[kind="primary"] {{
+            background: #111827 !important;
+            color: white !important;
+            border-color: #111827 !important;
+        }}
+
+        /* Uploaders */
+        [data-testid="stFileUploader"] {{
+            border-radius: 22px !important;
+            border: 1px solid rgba(17, 24, 39, 0.06) !important;
+            background:
+              radial-gradient(360px 160px at 90% 0%, {accent}22, transparent 70%),
+              rgba(255, 255, 255, 0.88) !important;
+            padding: 0.65rem !important;
+            box-shadow: 0 12px 36px rgba(80, 70, 160, 0.07) !important;
+        }}
+        [data-testid="stFileUploaderDropzone"] {{
+            border: 1.5px dashed {accent}66 !important;
+            border-radius: 18px !important;
+            background: rgba(255, 255, 255, 0.72) !important;
+            padding: 0.9rem !important;
+        }}
+        [data-testid="stFileUploaderDropzone"] button {{
+            border-radius: 12px !important;
+            background: #111827 !important;
+            color: white !important;
+        }}
+
+        /* Chat and forms */
+        [data-testid="stChatMessage"] {{
+            border-radius: 18px !important;
+            border: 1px solid rgba(17, 24, 39, 0.06) !important;
+            background: rgba(255,255,255,0.84) !important;
+            box-shadow: 0 10px 30px rgba(17, 24, 39, 0.04) !important;
+            padding: .4rem .7rem !important;
+            margin-bottom: .45rem !important;
+        }}
+        [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] {{
+            color: #374151 !important;
+            font-size: .94rem !important;
+            line-height: 1.55 !important;
+        }}
+        [data-testid="stForm"] {{
+            border-radius: 20px !important;
+            border: 1px solid rgba(17, 24, 39, 0.06) !important;
+            background: rgba(255, 255, 255, 0.82) !important;
+            box-shadow: 0 14px 42px rgba(17, 24, 39, 0.05) !important;
+            padding: .75rem !important;
+        }}
+        .stTextInput input,
+        textarea {{
+            border-radius: 16px !important;
+            border: 1px solid rgba(17, 24, 39, 0.10) !important;
+            background: rgba(255, 255, 255, 0.92) !important;
+            min-height: 46px !important;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.7) !important;
+        }}
+        .stTextInput input:focus,
+        textarea:focus {{
+            border-color: {accent} !important;
+            box-shadow: 0 0 0 4px {accent}22 !important;
+        }}
+
+        /* Cards, expanders, generated chart output */
+        .ds-card,
+        [data-testid="stExpander"] {{
+            border-radius: 20px !important;
+            border: 1px solid rgba(17, 24, 39, 0.06) !important;
+            background: rgba(255, 255, 255, 0.88) !important;
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08) !important;
+        }}
+        .viz-output-pane {{
+            position: sticky;
+            top: 0.75rem;
+        }}
+        .assistant-workspace {{
+            margin-top: 0.85rem;
+            padding: 1rem;
+            border-radius: 24px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(520px 220px at 88% 0%, {accent}18, transparent 70%),
+              rgba(255, 255, 255, 0.76);
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08);
+        }}
+        .eval-guidance-card,
+        .eval-empty-state {{
+            border-radius: 22px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(420px 180px at 88% 0%, {accent}1f, transparent 70%),
+              rgba(255, 255, 255, 0.86);
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08);
+        }}
+        .eval-guidance-card {{
+            margin: 0.15rem 0 0.65rem 0;
+            padding: 0.85rem 1rem;
+            color: #4b5563;
+            font-size: 0.9rem;
+            line-height: 1.55;
+        }}
+        .eval-empty-state {{
+            padding: clamp(1.25rem, 4vw, 2rem);
+            min-height: 320px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }}
+        .eval-empty-state .eyebrow {{
+            width: fit-content;
+            margin: 0 0 0.8rem 0;
+            padding: 0.35rem 0.65rem;
+            border-radius: 999px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255,255,255,0.72);
+            color: {accent};
+            font-size: 0.68rem;
+            font-weight: 800;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }}
+        .eval-empty-state h3 {{
+            margin: 0;
+            max-width: 560px;
+            color: #111827;
+            font-size: clamp(1.45rem, 2.2vw, 2rem);
+            line-height: 1.12;
+            letter-spacing: -0.04em;
+        }}
+        .eval-empty-state p:not(.eyebrow) {{
+            margin: 0.8rem 0 0 0;
+            max-width: 620px;
+            color: #6b7280;
+            font-size: 0.96rem;
+            line-height: 1.7;
+        }}
+        .analytics-section-card {{
+            margin-top: 0.8rem;
+            border-radius: 24px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(520px 220px at 88% 0%, {accent}18, transparent 70%),
+              rgba(255, 255, 255, 0.82);
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08);
+            padding: 1.1rem 1.2rem;
+        }}
+        .analytics-explorer-card {{
+            margin-top: 1.25rem;
+        }}
+        .analytics-section-heading span,
+        .analytics-filter-heading span {{
+            display: inline-flex;
+            width: fit-content;
+            margin-bottom: 0.45rem;
+            padding: 0.32rem 0.62rem;
+            border-radius: 999px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255, 255, 255, 0.72);
+            color: {accent};
+            font-size: 0.67rem;
+            font-weight: 800;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }}
+        .analytics-section-heading h3 {{
+            margin: 0;
+            color: #111827;
+            font-size: clamp(1.35rem, 2vw, 1.9rem);
+            line-height: 1.1;
+            letter-spacing: -0.04em;
+        }}
+        .analytics-section-heading p,
+        .analytics-filter-heading p {{
+            margin: 0.45rem 0 0 0;
+            color: #6b7280;
+            font-size: 0.95rem;
+            line-height: 1.6;
+        }}
+        .analytics-user-overview {{
+            margin: 0.9rem 0 1.25rem 0;
+            border-radius: 28px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(520px 260px at 92% 0%, rgba(109, 91, 208, 0.16), transparent 70%),
+              radial-gradient(420px 220px at 8% 100%, rgba(91, 140, 90, 0.13), transparent 70%),
+              rgba(255, 255, 255, 0.82);
+            box-shadow: 0 22px 70px rgba(80, 70, 160, 0.10);
+            padding: clamp(1rem, 2.4vw, 1.45rem);
+        }}
+        .analytics-user-summary {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            margin-bottom: 1rem;
+        }}
+        .analytics-user-summary span,
+        .analytics-audit-console span {{
+            width: fit-content;
+            border-radius: 999px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255, 255, 255, 0.72);
+            color: {accent};
+            padding: 0.32rem 0.62rem;
+            font-size: 0.67rem;
+            font-weight: 800;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }}
+        .analytics-user-summary h3,
+        .analytics-audit-console h3 {{
+            margin: 0;
+            color: #111827;
+            font-size: clamp(1.3rem, 2vw, 1.85rem);
+            line-height: 1.1;
+            letter-spacing: -0.04em;
+        }}
+        .analytics-user-summary p,
+        .analytics-audit-console p {{
+            margin: 0;
+            max-width: 680px;
+            color: #6b7280;
+            font-size: 0.94rem;
+            line-height: 1.65;
+        }}
+        .analytics-user-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.8rem;
+        }}
+        @media (max-width: 900px) {{
+            .analytics-user-grid {{
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }}
+        }}
+        @media (max-width: 620px) {{
+            .analytics-user-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+        .analytics-user-card {{
+            position: relative;
+            overflow: hidden;
+            border-radius: 22px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255, 255, 255, 0.78);
+            padding: 1rem;
+            box-shadow: 0 14px 42px rgba(17, 24, 39, 0.05);
+        }}
+        .analytics-user-card::before {{
+            content: "";
+            position: absolute;
+            inset: -40% -20% auto auto;
+            width: 150px;
+            height: 150px;
+            border-radius: 999px;
+            opacity: 0.18;
+            filter: blur(10px);
+        }}
+        .analytics-user-card.violet::before {{ background: #6d5bd0; }}
+        .analytics-user-card.emerald::before {{ background: #5b8c5a; }}
+        .analytics-user-card.amber::before {{ background: #d6a247; }}
+        .analytics-user-card.rose::before {{ background: #d06b9c; }}
+        .analytics-user-card.blue::before {{ background: #3b82f6; }}
+        .analytics-user-card.slate::before {{ background: #64748b; }}
+        .analytics-user-card-top {{
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }}
+        .analytics-avatar {{
+            display: flex;
+            width: 42px;
+            height: 42px;
+            align-items: center;
+            justify-content: center;
+            border-radius: 16px;
+            background: #111827;
+            color: white;
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+        }}
+        .analytics-user-card-top span {{
+            border-radius: 999px;
+            background: rgba(17, 24, 39, 0.06);
+            color: #374151;
+            padding: 0.25rem 0.55rem;
+            font-size: 0.72rem;
+            font-weight: 800;
+        }}
+        .analytics-user-card h4 {{
+            position: relative;
+            margin: 0.85rem 0 0.18rem 0;
+            color: #111827;
+            font-size: 1rem;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+        }}
+        .analytics-user-card p {{
+            position: relative;
+            margin: 0;
+            color: #9ca3af;
+            font-size: 0.78rem;
+            overflow-wrap: anywhere;
+        }}
+        .analytics-user-metric {{
+            position: relative;
+            display: flex;
+            align-items: baseline;
+            gap: 0.45rem;
+            margin-top: 0.85rem;
+        }}
+        .analytics-user-metric strong {{
+            color: #111827;
+            font-size: 1.55rem;
+            line-height: 1;
+        }}
+        .analytics-user-metric span {{
+            color: #6b7280;
+            font-size: 0.8rem;
+            font-weight: 700;
+        }}
+        .analytics-user-bar {{
+            position: relative;
+            margin-top: 0.8rem;
+            height: 0.45rem;
+            overflow: hidden;
+            border-radius: 999px;
+            background: rgba(17, 24, 39, 0.07);
+        }}
+        .analytics-user-bar i {{
+            display: block;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #6d5bd0, #a78bfa, #5b8c5a);
+        }}
+        .analytics-audit-console {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 0.9rem 0 0.7rem 0;
+            padding: clamp(1rem, 2.3vw, 1.4rem);
+            border-radius: 26px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(420px 210px at 92% 0%, rgba(91, 140, 90, 0.18), transparent 70%),
+              rgba(255, 255, 255, 0.86);
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08);
+        }}
+        .analytics-audit-console > div:first-child {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }}
+        .analytics-audit-stat {{
+            min-width: 138px;
+            border-radius: 22px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: #111827;
+            color: white;
+            padding: 1rem;
+            text-align: center;
+            box-shadow: 0 16px 42px rgba(17, 24, 39, 0.16);
+        }}
+        .analytics-audit-stat strong {{
+            display: block;
+            font-size: 2rem;
+            line-height: 1;
+        }}
+        .analytics-audit-stat small {{
+            display: block;
+            margin-top: 0.35rem;
+            color: rgba(255, 255, 255, 0.58);
+            font-size: 0.72rem;
+            font-weight: 800;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }}
+        @media (max-width: 720px) {{
+            .analytics-audit-console {{
+                align-items: stretch;
+                flex-direction: column;
+            }}
+            .analytics-audit-stat {{
+                width: 100%;
+            }}
+        }}
+        .analytics-filter-heading {{
+            margin: 0.4rem 0 0.75rem 0;
+            padding: 1rem;
+            border-radius: 20px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255, 255, 255, 0.78);
+            box-shadow: 0 14px 42px rgba(17, 24, 39, 0.05);
+        }}
+        .analytics-image-card {{
+            margin: 0.8rem 0;
+            padding: 1rem;
+            border-radius: 22px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255, 255, 255, 0.86);
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08);
+        }}
+        .analytics-selector-panel {{
+            margin: 1rem 0 0.7rem 0;
+            padding: clamp(1rem, 2.4vw, 1.5rem);
+            border-radius: 28px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(440px 220px at 90% 0%, rgba(109, 91, 208, 0.16), transparent 70%),
+              radial-gradient(380px 220px at 8% 100%, rgba(91, 140, 90, 0.13), transparent 70%),
+              rgba(255, 255, 255, 0.86);
+            box-shadow: 0 20px 65px rgba(80, 70, 160, 0.09);
+        }}
+        .analytics-selector-panel span,
+        .analytics-sheet-title span {{
+            display: inline-flex;
+            width: fit-content;
+            margin-bottom: 0.5rem;
+            border-radius: 999px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background: rgba(255,255,255,0.72);
+            color: {accent};
+            padding: 0.32rem 0.62rem;
+            font-size: 0.67rem;
+            font-weight: 800;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+        }}
+        .analytics-selector-panel h3,
+        .analytics-sheet-title h3 {{
+            margin: 0;
+            color: #111827;
+            font-size: clamp(1.35rem, 2vw, 1.9rem);
+            line-height: 1.1;
+            letter-spacing: -0.04em;
+        }}
+        .analytics-selector-panel p,
+        .analytics-sheet-title p {{
+            margin: 0.55rem 0 0 0;
+            max-width: 760px;
+            color: #6b7280;
+            font-size: 0.95rem;
+            line-height: 1.65;
+        }}
+        .analytics-selector-panel b {{
+            display: inline-flex;
+            margin-top: 0.9rem;
+            border-radius: 999px;
+            background: #111827;
+            color: white;
+            padding: 0.48rem 0.8rem;
+            font-size: 0.72rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }}
+        .analytics-sheet {{
+            margin-top: 1rem;
+            overflow: hidden;
+            border-radius: 28px;
+            border: 1px solid rgba(17, 24, 39, 0.06);
+            background:
+              radial-gradient(500px 260px at 88% 0%, {accent}14, transparent 72%),
+              rgba(255, 255, 255, 0.9);
+            box-shadow: 0 22px 70px rgba(80, 70, 160, 0.10);
+        }}
+        .analytics-sheet-title {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 1.15rem 1.2rem;
+            border-bottom: 1px solid rgba(17, 24, 39, 0.06);
+        }}
+        .analytics-sheet-title strong {{
+            min-width: 62px;
+            border-radius: 20px;
+            background: #111827;
+            color: white;
+            padding: 0.78rem 0.9rem;
+            text-align: center;
+            font-size: 1.35rem;
+            line-height: 1;
+            box-shadow: 0 14px 35px rgba(17, 24, 39, 0.16);
+        }}
+        .analytics-sheet-head {{
+            display: grid;
+            gap: 0.65rem;
+            padding: 0.8rem 1rem;
+            background: rgba(17, 24, 39, 0.03);
+            color: #6b7280;
+            font-size: 0.68rem;
+            font-weight: 900;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }}
+        .analytics-sheet-body {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            padding: 0.85rem;
+        }}
+        .analytics-sheet-row {{
+            display: grid;
+            grid-template-columns: repeat(var(--sheet-cols), minmax(0, 1fr));
+            gap: 0.65rem;
+            align-items: center;
+            border-radius: 20px;
+            border: 1px solid rgba(17, 24, 39, 0.05);
+            background: rgba(255, 255, 255, 0.86);
+            padding: 0.85rem;
+            box-shadow: 0 10px 28px rgba(17, 24, 39, 0.04);
+            animation: analytics-row-in 0.45s ease both;
+            animation-delay: var(--row-delay);
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        }}
+        .analytics-sheet-row:hover {{
+            transform: translateY(-2px);
+            border-color: {accent}44;
+            box-shadow: 0 16px 42px rgba(80, 70, 160, 0.12);
+        }}
+        .analytics-sheet-cell {{
+            min-width: 0;
+            color: #374151;
+            font-size: 0.86rem;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }}
+        .analytics-sheet-cell.badge-cell {{
+            width: fit-content;
+            max-width: 100%;
+            border-radius: 999px;
+            background: rgba(109, 91, 208, 0.10);
+            color: #5b4ac4;
+            padding: 0.36rem 0.62rem;
+            font-size: 0.78rem;
+            font-weight: 800;
+        }}
+        @keyframes analytics-row-in {{
+            from {{
+                opacity: 0;
+                transform: translateY(8px) scale(0.99);
+            }}
+            to {{
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }}
+        }}
+        @media (max-width: 820px) {{
+            .analytics-sheet-head {{
+                display: none;
+            }}
+            .analytics-sheet-row {{
+                grid-template-columns: 1fr;
+            }}
+            .analytics-sheet-title {{
+                align-items: flex-start;
+                flex-direction: column;
+            }}
+        }}
+        .compact-label h4,
+        .compact-label h3 {{
+            margin-bottom: .15rem !important;
+        }}
+        [data-testid="stExpander"] details {{
+            border: none !important;
+        }}
+        .stImage img {{
+            border-radius: 22px !important;
+            box-shadow: 0 18px 48px rgba(17, 24, 39, 0.10) !important;
+        }}
+
+        /* Admin tables and tabs */
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: .55rem !important;
+            border-radius: 18px !important;
+            background: rgba(255,255,255,.76) !important;
+            padding: .35rem !important;
+            border: 1px solid rgba(17,24,39,.06) !important;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            border-radius: 14px !important;
+            color: #6b7280 !important;
+            font-weight: 700 !important;
+        }}
+        .stTabs [aria-selected="true"] {{
+            background: #111827 !important;
+            color: white !important;
+        }}
+        [data-testid="stDataFrame"] {{
+            border-radius: 24px !important;
+            overflow: hidden !important;
+            border: 1px solid rgba(17, 24, 39, 0.06) !important;
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08) !important;
+        }}
+        .stSelectbox > div > div,
+        .stDateInput input {{
+            border-radius: 16px !important;
+            border: 1px solid rgba(17,24,39,.10) !important;
+            background: rgba(255,255,255,.9) !important;
+        }}
+
+        @keyframes subtle-float {{
+            0%, 100% {{ transform: translateY(0); }}
+            50% {{ transform: translateY(-4px); }}
+        }}
+        [data-testid="stSpinner"] {{
+            border-radius: 20px !important;
+            background: rgba(255,255,255,.88) !important;
+            box-shadow: 0 18px 55px rgba(80, 70, 160, 0.08) !important;
+            padding: .75rem 1rem !important;
+            animation: subtle-float 2.4s ease-in-out infinite;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # Initialize analytics session (keep for backward compatibility with existing analytics)
 if "analytics_initialized" not in st.session_state:
@@ -331,6 +1099,28 @@ def convert_to_csv(input_file: str, output_file: str = None) -> str:
     except Exception as e:
         st.error(f"Error converting file: {e}")
         return None
+
+
+def prepare_dataframe_for_lida(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dataframe types that LIDA's summarizer cannot safely inspect."""
+    safe_df = df.copy()
+    for column in safe_df.columns:
+        series = safe_df[column]
+        non_null = series.dropna()
+
+        # LIDA's datetime probing calls pd.to_datetime(..., errors="raise") on
+        # object columns and catches ValueError, but pandas raises TypeError for
+        # bool objects. Treat booleans as categorical text for stable summaries.
+        if pd.api.types.is_bool_dtype(series):
+            safe_df[column] = series.map(lambda value: "" if pd.isna(value) else str(bool(value)))
+            continue
+
+        if series.dtype == object and not non_null.empty:
+            has_bool_values = non_null.map(lambda value: isinstance(value, bool)).any()
+            if has_bool_values:
+                safe_df[column] = series.map(lambda value: "" if pd.isna(value) else str(value))
+
+    return safe_df
 
 def gen_summary(data_summary, model="gpt-4o"):
     prompt = f"""
@@ -443,6 +1233,17 @@ def base64_to_image(base64_string: str) -> Image.Image:
     return Image.open(BytesIO(base64.b64decode(base64_string)))
 
 
+def summary_to_dict(summary):
+    """Return a JSON-friendly dict while preserving the original LIDA Summary object elsewhere."""
+    if isinstance(summary, dict):
+        return summary
+    if hasattr(summary, "dict"):
+        return summary.dict()
+    if hasattr(summary, "model_dump"):
+        return summary.model_dump()
+    return dict(getattr(summary, "__dict__", {}))
+
+
 def encode_image(image_path: str) -> str:
     """Encode an image file to base64 string."""
     with open(image_path, "rb") as image_file:
@@ -461,17 +1262,38 @@ You are an expert in data visualization quality assessment. Your task is to anal
 {json.dumps(visualization_rules, indent=2)}
 
 **Your Task:**
-- Provide a brief interpretation of the chart in 3-4 sentences, summarizing its main insights.
-- Verify if the chart has proper x-axis and y-axis labels that are completely visible and a title.
-- Check whether labels and titles are properly aligned (centered).
-- Ensure the chart size is appropriate (width and height).
-- Evaluate if the color palette is distinct and accessible (avoid red-green conflicts).
-- Assess the readability of fonts (size between 10-20 and clear fonts).
-- Verify consistent axis scaling with ticks.
-- Confirm that the legend is present, well-positioned, and clear.
+- Return the evaluation in the exact structure below, using concise plain markdown.
+- Do not wrap the response in code fences.
+- Score strictly from 0 to 100 based on clarity, labeling, color, layout, readability, and interpretability.
+- Be direct and practical. Avoid vague comments.
 
-If all checks pass, respond with: "Visualization quality validation completed."
-Otherwise, provide specific feedback on what needs to be improved.
+OVERALL SCORE: <number>/100
+
+SUMMARY:
+<2-3 sentences interpreting the chart and overall quality.>
+
+STRENGTHS:
+- <specific strength>
+- <specific strength>
+- <specific strength>
+
+ISSUES:
+- <specific issue or "No major issue found">
+- <specific issue>
+
+RECOMMENDATIONS:
+- <actionable improvement>
+- <actionable improvement>
+- <actionable improvement>
+
+CHECKLIST:
+- Title: Pass/Needs work - <short reason>
+- Axis labels: Pass/Needs work - <short reason>
+- Legend: Pass/Needs work - <short reason>
+- Color contrast: Pass/Needs work - <short reason>
+- Font readability: Pass/Needs work - <short reason>
+- Layout / cropping: Pass/Needs work - <short reason>
+- Chart type fit: Pass/Needs work - <short reason>
     """
     return prompt, encoded_image
 
@@ -519,6 +1341,60 @@ def stateful_button(label: str, key: str, state_key: str = None) -> bool:
     return st.session_state[state_key]
 
 
+def render_visual_activity_sheet(
+    df: pd.DataFrame,
+    columns: list,
+    labels: dict,
+    title: str,
+    subtitle: str,
+):
+    """Render analytics records as a polished HTML activity sheet."""
+    visible_columns = [column for column in columns if column in df.columns]
+    if not visible_columns or df.empty:
+        st.info("No activity records found for this view.")
+        return
+
+    header_cells = "".join(
+        f'<span>{html.escape(labels.get(column, column.replace("_", " ").title()))}</span>'
+        for column in visible_columns
+    )
+    rows_html = []
+    for row_index, (_, row) in enumerate(df[visible_columns].head(75).iterrows()):
+        cells = []
+        for column in visible_columns:
+            value = row.get(column, "")
+            if pd.isna(value):
+                display_value = "N/A"
+            elif isinstance(value, bool):
+                display_value = "Yes" if value else "No"
+            else:
+                display_value = str(value)
+
+            escaped_value = html.escape(display_value)
+            cell_class = "analytics-sheet-cell"
+            if column in {"visualization_generated", "chart_type", "action_type"}:
+                cell_class += " badge-cell"
+            cells.append(f'<div class="{cell_class}">{escaped_value}</div>')
+
+        rows_html.append(
+            f'<div class="analytics-sheet-row" style="--row-delay:{min(row_index, 18) * 0.035}s">'
+            f'{"".join(cells)}'
+            f'</div>'
+        )
+
+    st.markdown(
+        f'<div class="analytics-sheet">'
+        f'<div class="analytics-sheet-title">'
+        f'<div><span>Activity Sheet</span><h3>{html.escape(title)}</h3><p>{html.escape(subtitle)}</p></div>'
+        f'<strong>{len(df)}</strong>'
+        f'</div>'
+        f'<div class="analytics-sheet-head" style="grid-template-columns: repeat({len(visible_columns)}, minmax(0, 1fr));">{header_cells}</div>'
+        f'<div class="analytics-sheet-body" style="--sheet-cols:{len(visible_columns)};">{"".join(rows_html)}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def refine_query(query, chart_selected):
     prompt = f"""
     You are an expert in data visualization and analytics.
@@ -527,9 +1403,12 @@ def refine_query(query, chart_selected):
     "{query}"
 
     Task:
-    - Rewrite the user's query to make it clear, concise, and well-suited for visualization using the recommended chart type: "{chart_selected}".
+    - Rewrite the user's query to make it clear, concise, and well-suited for visualization using this exact chart type: "{chart_selected}".
+    - Do not switch to a different chart type unless "{chart_selected}" is impossible for the available data.
     - Ensure the refined query is specific and actionable for chart generation.
-    - Briefly explain why "{chart_selected}" is the most appropriate chart type for this query, referencing the validation details if relevant.
+    - Include clear encoding guidance such as what should be on x-axis, y-axis, color/grouping, and aggregation if needed.
+    - Briefly explain why "{chart_selected}" is appropriate for this query, referencing the validation details if relevant.
+    - Make the query robust for rendering: avoid overcrowded labels, choose readable grouping, and prefer top categories when too many categories exist.
     - Return your response as two parts: 
         1. The improved/refined query.
         2. A short justification for the chart choice.
@@ -550,99 +1429,26 @@ def refine_query(query, chart_selected):
 # --------------------- Viz Evaluator UI ---------------------
 
 def run_viz_evaluator():
-        # ----- Global CSS -----
-    st.markdown(
-        """
-        <style>
-        /* Hide Streamlit footer & menu */
-        #MainMenu, footer {visibility: hidden;}
+    from magic_wrapper import render_magic_evaluator_header, render_magic_feedback
 
-        /* Hero section */
-        .hero {
-            background: linear-gradient(135deg, #0066CC, #0052A3);
-            color: white;
-            padding: 1rem;
-            border-radius: 12px;
-            text-align: center;
-            margin-bottom: 2rem;
-            height: 22vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .hero h1 {
-            margin: 0 0 0.5rem 0;
-            font-size: 2.8rem;
-            font-weight: 800;
-        }
-        .hero p {
-            font-size: 1.1rem;
-            margin: 0;
-            opacity: 0.95;
-            font-weight: 500;
-        }
+    inject_magic_page_styles("evaluator")
+    render_page_actions(active="viz_evaluator")
+    render_magic_evaluator_header(key="eval_header")
 
-        /* Section headers */
-        .section-header {
-            color: #0066CC;
-            font-size: 1.8rem;
-            font-weight: 700;
-            margin-top: 2rem;
-            margin-bottom: 1.5rem;
-            padding-bottom: 0.75rem;
-            border-bottom: 3px solid #0066CC;
-        }
-
-        /* Card style for goals & summaries */
-        .card {
-            background-color: white;
-            padding: 1.5rem;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-            margin-bottom: 1.5rem;
-            border: 1px solid #E2E8F0;
-        }
-        .card h4 {
-            color: #0052A3;
-            margin-top: 0;
-        }
-        .card p {
-            margin: 0.75rem 0;
-            color: #1E293B;
-            font-size: 0.95rem;
-            line-height: 1.6;
-        }
-
-        /* Textarea styling override */
-        textarea {
-            border: 2px solid #E2E8F0 !important;
-            border-radius: 8px !important;
-            padding: 1rem !important;
-            font-size: 14px !important;
-        }
-        textarea:focus {
-            border-color: #0066CC !important;
-            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1) !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ----- Hero -----
-    st.markdown(
-        """
-        <div class="hero">
-          <h1>Visualization Evaluator</h1>
-          <p>Upload your visualizations - LLM will inspect every element and provide smart, actionable feedback</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    
-    uploaded_file = st.file_uploader("📂 Upload your  image file", type=["png", "jpg", "jpeg"])
+    eval_left, eval_right = st.columns([0.95, 1.35], gap="medium")
+    with eval_left:
+        st.markdown("<div class='compact-label'>", unsafe_allow_html=True)
+        st.markdown("#### Upload chart image")
+        st.caption("PNG, JPG, or JPEG.")
+        uploaded_file = st.file_uploader("Upload your visualization image", type=["png", "jpg", "jpeg"])
+        st.markdown("</div>", unsafe_allow_html=True)
     
     if uploaded_file:
+        current_eval_file = f"{uploaded_file.name}:{uploaded_file.size}"
+        if st.session_state.get("latest_eval_file") != current_eval_file:
+            st.session_state.latest_eval_file = current_eval_file
+            st.session_state.latest_eval_feedback = None
+
         try:
             image = Image.open(uploaded_file)
         except Exception as e:
@@ -652,12 +1458,27 @@ def run_viz_evaluator():
         # Save the uploaded image to a temporary file
         temp_image_path = "output_image.png"
         image.save(temp_image_path)
-        st.image(temp_image_path, caption="Uploaded Visualization", use_container_width=True)
+        with eval_left:
+            st.markdown("<div class='ds-card'>", unsafe_allow_html=True)
+            st.image(temp_image_path, caption="Uploaded Visualization", use_container_width=True)
+            st.caption(f"{uploaded_file.name} · {image.width} x {image.height}px")
+            st.markdown("</div>", unsafe_allow_html=True)
         
         visualization_quality_rules = load_json("quality_rules.json").get("VISUALIZATION_QUALITY_RULES", {})
         
         # Add a button to trigger the evaluation
-        if st.button("Evaluate Visualization"):
+        with eval_left:
+            st.markdown(
+                """
+                <div class="eval-guidance-card">
+                    <span>AI will check labels, legend, colors, layout, cropping, readability, and chart-type fit.</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            evaluate_clicked = st.button("Scan Visualization", type="primary", use_container_width=True)
+
+        if evaluate_clicked:
             # Save the uploaded image to a persistent file
             persistent_image_path = temp_image_path
             try:
@@ -701,6 +1522,7 @@ def run_viz_evaluator():
 
             with st.spinner("🔍 Evaluating visualization quality..."):
                 feedback = validate_visualization_image_with_llm(temp_image_path, visualization_quality_rules)
+                st.session_state.latest_eval_feedback = feedback
                 eval_response_time = time.time() - eval_start_time
                 
                 # Log to analytics module - chart evaluation
@@ -730,489 +1552,351 @@ def run_viz_evaluator():
                     )
                 except Exception as e:
                     st.warning(f"Could not log feedback: {e}")
-                
-                st.markdown("## ✅ Visualization Quality Feedback")
-                # Styled feedback card
+        with eval_right:
+            st.markdown("<div class='viz-output-pane'>", unsafe_allow_html=True)
+            if st.session_state.get("latest_eval_feedback"):
+                render_magic_feedback(feedback_text=st.session_state.latest_eval_feedback, key="eval_feedback")
+            else:
                 st.markdown(
-                    f"""
-                    <div style="background-color: #F0FDF4; border-left: 4px solid #10B981; padding: 1.5rem; border-radius: 12px; margin-top: 1.5rem; box-shadow: 0 4px 12px rgba(0,0,0,0.08);">
-                        <h4 style="color: #10B981; margin-top: 0;">📋 Feedback Summary</h4>
-                        <p style="font-size: 0.95rem; line-height: 1.7; color: #1E293B; margin: 0;">{feedback}</p>
+                    """
+                    <div class="eval-empty-state">
+                        <p class="eyebrow">Ready to review</p>
+                        <h3>Run the scan to get your quality report.</h3>
+                        <p>The report will summarize the chart, score it, list issues, and give concrete recommendations.</p>
                     </div>
                     """,
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
+            st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        with eval_right:
+            st.markdown("<div class='viz-output-pane'>", unsafe_allow_html=True)
+            st.markdown(
+                """
+                <div class="eval-empty-state">
+                    <p class="eyebrow">Visualization evaluator</p>
+                    <h3>Upload a chart image to begin.</h3>
+                    <p>Once uploaded, VisualStats will inspect readability, labels, legend placement, colors, and layout issues.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
 def deduplicate(seq):
     seen = set()
     return [x for x in seq if not (x in seen or seen.add(x))]
 
+
+def get_chart_type_choices() -> list:
+    """Flatten configured chart types into a user-facing selector."""
+    choices = []
+    try:
+        chart_rules = load_json("chart_selection.json").get("VALIDATION_RULES", {})
+        for category in chart_rules.values():
+            for charts in category.values():
+                choices.extend(charts)
+    except Exception:
+        pass
+
+    fallback = [
+        "Bar/Column Chart",
+        "Line Chart",
+        "Scatter Plot",
+        "Pie Chart",
+        "Histogram",
+        "Box Plot",
+        "Heatmap",
+        "Area Chart",
+    ]
+    return ["Auto (recommended)"] + deduplicate(choices or fallback)
+
 # --------------------- Viz Generator UI ---------------------
 def run_viz_generator():
-    """Run the visualization generator interface with enhanced UI styling."""
+    """Run the visualization generator interface with a Split View UI."""
+    from magic_wrapper import render_magic_workspace_header, render_magic_empty_canvas
 
-    # ----- Global CSS -----
-    st.markdown(
-        """
-        <style>
-        /* Hide Streamlit footer & menu */
-        #MainMenu, footer {visibility: hidden;}
-
-        /* Hero section */
-        .hero {
-            background: linear-gradient(135deg, #0066CC, #0052A3);
-            color: white;
-            padding: 1rem;
-            border-radius: 12px;
-            text-align: center;
-            margin-bottom: 2rem;
-            height: 22vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .hero h1 {
-            margin: 0 0 0.5rem 0;
-            font-size: 2.8rem;
-            font-weight: 800;
-        }
-        .hero p {
-            font-size: 1.1rem;
-            margin: 0;
-            opacity: 0.95;
-            font-weight: 500;
-        }
-
-        /* Section headers */
-        .section-header {
-            color: #0066CC;
-            font-size: 1.8rem;
-            font-weight: 700;
-            margin-top: 2rem;
-            margin-bottom: 1.5rem;
-            padding-bottom: 0.75rem;
-            border-bottom: 3px solid #0066CC;
-        }
-
-        /* Card style for goals & summaries */
-        .card {
-            background-color: white;
-            padding: 1.5rem;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-            margin-bottom: 1.5rem;
-            border: 1px solid #E2E8F0;
-        }
-        .card h4 {
-            color: #0052A3;
-            margin-top: 0;
-        }
-        .card p {
-            margin: 0.75rem 0;
-            color: #1E293B;
-            font-size: 0.95rem;
-            line-height: 1.6;
-        }
-
-        /* Textarea styling override */
-        textarea {
-            border: 2px solid #E2E8F0 !important;
-            border-radius: 8px !important;
-            padding: 1rem !important;
-            font-size: 14px !important;
-        }
-        textarea:focus {
-            border-color: #0066CC !important;
-            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1) !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
+    inject_magic_page_styles("generator")
+    render_page_actions(active="viz_generator")
+    render_magic_workspace_header(
+        title="Visualization Workspace",
+        subtitle="Upload your data, describe what you want to see, and refine charts through conversation.",
+        icon="generator",
+        key="viz_header",
     )
 
-    # ----- Hero -----
-    st.markdown(
-        """
-        <div class="hero">
-          <h1>Visualization Generator</h1>
-          <p>Turn your data into visuals and insights and have conversations with your charts</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    col_left, col_right = st.columns([1.0, 1.35], gap="medium")
 
-    # ----- File Uploader -----
-    uploaded_file = st.file_uploader("📂 Upload your dataset", type=["csv", "xlsx", "xls", "json", "xml", "txt"])
+    with col_left:
+        st.markdown("<div class='compact-label'>", unsafe_allow_html=True)
+        st.markdown("#### Dataset")
+        st.caption("Upload CSV, Excel, JSON, XML, or text.")
+        uploaded_file = st.file_uploader("Upload your dataset", type=["csv", "xlsx", "xls", "json", "xml", "txt"])
+        st.markdown("</div>", unsafe_allow_html=True)
+    
     if not uploaded_file:
+        with col_right:
+            render_magic_empty_canvas(key="empty_canvas")
         return
 
-    # Save & convert
-    file_path = uploaded_file.name
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getvalue())
-    
-    # Log dataset upload
-    try:
-        file_size = len(uploaded_file.getvalue())
-        dataset_id = db.log_dataset_upload(
-            st.session_state.user_id,
-            uploaded_file.name,
-            uploaded_file.type,
-            file_size,
-            0,  # Will be updated after reading CSV
-            0,  # Will be updated after reading CSV
-            []  # Will be updated after reading CSV
-        )
-        st.session_state.current_dataset_id = dataset_id
+    with col_left:
+        # Save & convert
+        file_path = uploaded_file.name
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
         
-        db.log_interaction(st.session_state.user_id, "dataset_upload", {
-            "filename": uploaded_file.name,
-            "file_size": file_size,
-            "dataset_id": dataset_id
-        }, "Viz Generator")
-        
-        # Log to analytics module (new system)
-        log_interaction(
-            st.session_state.get("user_id") or st.session_state.get("admin_id"),
-            st.session_state.username,
-            st.session_state.session_id,
-            "file_upload",
-            {
-                "filename": uploaded_file.name,
-                "file_size_mb": round(file_size / (1024 * 1024), 2),
-                "file_type": uploaded_file.type or "unknown"
-            }
-        )
-        
-        st.session_state.interaction_count["datasets_uploaded"] += 1
-    except Exception as e:
-        st.warning(f"Could not log interaction: {e}")
-
-    csv_path = convert_to_csv(file_path)
-    if not csv_path:
-        st.error("Could not convert file to CSV.")
-        st.stop()
-
-    # Load & summarize
-    df = pd.read_csv(csv_path)
-    
-    summary = lida.summarize(csv_path, summary_method="default", textgen_config=textgen_config)
-    st.markdown('<div class="section-header">Data Overview</div>', unsafe_allow_html=True)
-    
-    for field in summary.get("fields", []):
-        col_name = field.get("column")
-        props = field.get("properties", {})
-        dtype = props.get("dtype", "").lower()
-
-        # Auto-infer semantic type
-        if dtype == "number":
-            semantic_type = "quantitative"
-        elif dtype == "category":
-            semantic_type = "categorical"
-        elif "date" in col_name.lower() or dtype == "datetime":
-            semantic_type = "temporal"
-        else:
-            semantic_type = "text"
-
-        # Generate description if missing or empty
-        description = props.get("description", "").strip()
-        if not description:
-            description = f"{col_name.replace('_', ' ').capitalize()} of the record"
-
-        # Update the properties
-        props["semantic_type"] = semantic_type
-        props["description"] = description
-    
-    
-    overview = gen_summary(summary)
-    st.write(overview)
-
-    with st.expander("📋 Full Data Summary"):
-        st.json(summary)
-    
-    # Save dataset summary to chat storage
-    try:
-        save_dataset_summary(
-            st.session_state.user_id,
-            st.session_state.session_id,
-            summary
-        )
-    except Exception as e:
-        print(f"Error saving dataset summary: {e}")
-
-    # ----- Suggested Goals -----
-    goals = lida.goals(summary, n=2, textgen_config=textgen_config)
-    st.markdown('<div class="section-header">💡 Suggested Goals</div>', unsafe_allow_html=True)
-    for goal in goals:
-        st.markdown(
-            f"""
-            <div class="card">
-              <h4 style="color:#ff7f0e;">🎯 Goal {goal.index+1}</h4>
-              <p><strong>🔍 Question:</strong> {goal.question}</p>
-              <p><strong>📊 Visualization:</strong> {goal.visualization}</p>
-              <p><strong>🧠 Rationale:</strong> {goal.rationale}</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # ----- User Query & Validation -----
-    st.markdown('<div class="section-header">📝 Define Your Own Goal</div>', unsafe_allow_html=True)
-    query = st.text_area("Ask a question or describe your chart goal", height=150)
-
-    if "chart_options" not in st.session_state:
-        st.session_state.chart_options = []
-    
-    if "validated" not in st.session_state:
-        st.session_state.validated = {}
-
-    if st.button("Generate Graph"):
-        # Log user query
-        try:
-            db.log_interaction(st.session_state.user_id, "query_submitted", {
-                "query": query
-            }, "Viz Generator")
-            st.session_state.interaction_count["queries_made"] += 1
-        except Exception as e:
-            st.warning(f"Could not log query: {e}")
-        
-        # Save user query to chat history
-        save_chat_message(
-            st.session_state.user_id,
-            st.session_state.session_id,
-            "user",
-            query,
-            metadata={"source": "viz_generator"}
-        )
-        
-        validated = validate_user_query(query, summary, load_json("chart_selection.json")["VALIDATION_RULES"])
-        
-        # Safe extraction with fallback in case the LLM misses the key
-        all_chart_types_str = validated.get('All Chart Types', validated.get('Recommended chart', ''))
-        print(all_chart_types_str)
-
-        if validated.get("Valid") != "Yes":
-            st.error(f"Invalid query: {validated.get('Reason', 'Unknown error')}")
-            st.stop()
-        st.session_state.validated = validated
-        
-        # Split string safely, avoiding empty strings
-        st.session_state.chart_options = [c.strip() for c in all_chart_types_str.split(",") if c.strip()]
-        
-        # Fallback if somehow completely empty
-        if not st.session_state.chart_options:
-            st.session_state.chart_options = ["Bar/Column Chart"]
-            
-        print(st.session_state.chart_options)
-  
-
-    if st.session_state.chart_options:
-        validated = st.session_state.validated
-        with st.expander("🔍 Visualization Details", expanded=True):
-            st.markdown(f"""
-            **🔍 Variables Involved:**  
-            {", ".join(validated.get("All Variables involved", [])) if isinstance(validated.get("All Variables involved", []), list) else validated.get("All Variables involved", "")}
-
-            **🔗 Relationship Between Variables:**  
-            {validated.get("Relationship between variables", "")}
-
-            **📊 Chart Mentioned in Prompt:**  
-            {validated.get("Chart mentioned in prompt", "")}
-
-            **✅ Recommended Chart Type:**  
-            {validated.get("Recommended chart", "")}
-
-            **🧠 Justification:**  
-            {validated.get("Justification", "")}
-                            """)
-            
-            validated = st.session_state.validated
-            
-        chart_selected = st.selectbox(
-            'Select chart type',
-            st.session_state.chart_options,
-            index=0,
-            key="chart_selected"
-        )
-
-        refined = refine_query(query, chart_selected)
-        
-        # Log AI interaction
-        try:
-            db.log_ai_conversation(
-                st.session_state.user_id,
-                query,
-                refined,
-                True,
-                chart_selected
-            )
-        except Exception as e:
-            st.warning(f"Could not log AI conversation: {e}")
-        
-        # Save refined query to chat history
-        save_chat_message(
-            st.session_state.user_id,
-            st.session_state.session_id,
-            "assistant",
-            refined,
-            metadata={
-                "response_time_seconds": 0,
-                "model": "gpt-4o",
-                "chart_type": chart_selected,
-                "source": "viz_generator"
-            }
-        )
-        
-        st.info(f"{refined}")
-            
-        # generate initial chart
-        query_start_time = time.time()
-        charts = lida.visualize(
-            summary=summary,
-            goal=refined,
-            textgen_config=textgen_config,
-            library="seaborn"
-        )
-        ai_response_time = time.time() - query_start_time
-        if charts:
-            base_instructions = [
-                    "Don't change the chart type until explicitly mentioned in the instructions.",
-                    "Ensure that long x-axis or y-axis labels are not truncated. Rotate or wrap them if needed.",
-                    "Adjust the chart margins and layout so that x-axis and y-axis titles are fully visible and not cut off. If required move them closer to the chart.",
-                    "Fit the complete chart within the canvas, including all labels and axis titles.",
-                    "Ensure the x-axis title is fully visible by adjusting bottom padding or layout.",
-                    "If the x-axis labels are long, rotate them or reduce font size to avoid overlap.",
-                    "Use colors that are aesthetically pleasing and have good contrast for accessibility.",
-                    "Maintain appropriate font sizes for readability without crowding the chart.",
-                    "Avoid clutter and minimize grid lines or unnecessary visual elements.",
-                    "Use consistent spacing and alignment for a clean, professional look.",
-                    "Keep the chart simple and easy to understand, avoiding unnecessary complexity.",
-                ]
-            st.session_state["chart_code"] = charts[0].code
-            st.session_state["base_edit_instructions"] = base_instructions
-            chart_placeholder = st.empty()
-            
-
-            with st.spinner("Generating final chart..."):
-                final_charts_list = lida.edit(
-                    code=charts[0].code,
-                    summary=summary,
-                    instructions=base_instructions,
-                    library="seaborn",
-                    textgen_config=textgen_config
-                )
-                
-                if final_charts_list and len(final_charts_list) > 0:
-                    final_chart = final_charts_list[0]
-                else:
-                    # Fallback to the initial chart if LIDA edit engine fails
-                    st.warning("⚠️ Could not apply all stylistic refinements. Displaying the base chart.")
-                    final_chart = charts[0]
-                    
-            img = base64_to_image(final_chart.raster)
-            chart_placeholder.image(img, use_container_width=True)
-            st.session_state["chart_code"] = final_chart.code
-            
-            # Save generated image to chat storage
-            image_metadata = None
+        # Log dataset upload once
+        if st.session_state.get("last_uploaded_file") != uploaded_file.name:
             try:
-                img_byte_arr = BytesIO()
-                img.save(img_byte_arr, format='PNG')
-                img_data = img_byte_arr.getvalue()
-
-                image_metadata = save_generated_image(
-                    st.session_state.user_id,
-                    st.session_state.session_id,
-                    img_data,
-                    chart_type=chart_selected,
-                    query=query,
-                    image_format="png"
+                file_size = len(uploaded_file.getvalue())
+                dataset_id = db.log_dataset_upload(
+                    st.session_state.user_id, uploaded_file.name, uploaded_file.type,
+                    file_size, 0, 0, []
                 )
-                if image_metadata:
-                    st.session_state.interaction_count["visualizations_created"] += 1
-            except Exception as e:
-                print(f"Error saving generated image: {e}")
-            # Log visualization creation
-            try:
-                db.log_visualization(
-                    st.session_state.user_id,
-                    st.session_state.get("current_dataset_id", "unknown"),
-                    chart_selected,
-                    validated.get("All Variables involved", []),
-                    query,
-                    "generated",
-                    image_path=image_metadata.get("path") if image_metadata else None,
-                    source_type='generated'
-                )
-            except Exception as e:
-                print(f"Error logging visualization: {e}")
-                
-                # Log to analytics module (new system) - AI query
+                st.session_state.current_dataset_id = dataset_id
+                st.session_state.last_uploaded_file = uploaded_file.name
+                st.session_state.interaction_count["datasets_uploaded"] += 1
                 log_interaction(
                     st.session_state.get("user_id") or st.session_state.get("admin_id"),
-                    st.session_state.username,
-                    st.session_state.session_id,
-                    "ai_query",
-                    {
-                        "user_query": query[:100],
-                        "response_time_seconds": round(ai_response_time, 2),
-                        "model_used": "GPT-4o",
-                        "chart_type": chart_selected
-                    }
+                    st.session_state.username, st.session_state.session_id,
+                    "file_upload", {"filename": uploaded_file.name, "file_size_mb": round(file_size / (1024 * 1024), 2)}
                 )
-                
-                st.session_state.interaction_count["visualizations_created"] += 1
             except Exception as e:
-                st.warning(f"Could not log visualization: {e}")
+                pass
 
-            # ----- Chart Tweaks -----
-            st.markdown('<div class="section-header">✏️ Refine Your Chart</div>', unsafe_allow_html=True)
-            extra = st.text_area("Additional instructions", height=100)
-            if st.button("Update Chart", key="update_chart") and extra.strip():
-                if "chart_code" not in st.session_state:
-                    st.error("Generate a chart first!")
-                else:
-                    # Log chart refinement
-                    refine_start_time = time.time()
-                    try:
-                        db.log_interaction(st.session_state.user_id, "chart_refined", {
-                            "refinement_instructions": extra
-                        }, "Viz Generator")
-                    except Exception as e:
-                        st.warning(f"Could not log refinement: {e}")
-                    
-                    with st.spinner("Generating final chart..."):
-                        chart_code = st.session_state.get("chart_code")
-                        instr = ["Keep all the properties of the existing chart, additionally add:"] + [extra]
-                        updated_list = lida.edit(
-                            code=chart_code,
-                            summary=summary,
-                            instructions=instr,
-                            library="seaborn",
-                            textgen_config=textgen_config
+        csv_path = convert_to_csv(file_path)
+        if not csv_path:
+            st.error("Could not convert file to CSV.")
+            st.stop()
+
+        # Streamlit reruns recreate the global LIDA Manager, so keep its in-memory
+        # dataframe attached on every run. Use a sanitized copy for LIDA because
+        # its summarizer can crash on object columns that contain booleans.
+        try:
+            raw_df = load_dataset_csv(csv_path)
+        except UploadedDatasetError as e:
+            st.error(str(e))
+            st.stop()
+        df = prepare_dataframe_for_lida(raw_df)
+        lida.data = df
+        lida_csv_path = os.path.splitext(csv_path)[0] + "_lida_safe.csv"
+        df.to_csv(lida_csv_path, index=False)
+        summary_cache_key = f"{csv_path}:lida_safe_v1"
+
+        # Load & summarize
+        if "summary" not in st.session_state or st.session_state.get("summary_file") != summary_cache_key:
+            with st.spinner("Analyzing dataset..."):
+                summary_obj = lida.summarize(lida_csv_path, summary_method="default", textgen_config=textgen_config)
+                summary = summary_to_dict(summary_obj)
+                for field in summary.get("fields", []):
+                    col_name = field.get("column")
+                    props = field.get("properties", {})
+                    dtype = props.get("dtype", "").lower()
+                    if dtype == "number": props["semantic_type"] = "quantitative"
+                    elif dtype == "category": props["semantic_type"] = "categorical"
+                    elif "date" in col_name.lower() or dtype == "datetime": props["semantic_type"] = "temporal"
+                    else: props["semantic_type"] = "text"
+                    props["description"] = props.get("description", "").strip() or f"{col_name.replace('_', ' ').capitalize()}"
+                
+                overview = gen_summary(summary)
+                st.session_state.summary_obj = summary_obj
+                st.session_state.summary = summary
+                st.session_state.overview = overview
+                st.session_state.summary_file = summary_cache_key
+                
+                # Fetch goals
+                st.session_state.goals = lida.goals(summary_obj, n=2, textgen_config=textgen_config)
+                goals = st.session_state.goals
+                
+                # Save to db
+                try: save_dataset_summary(st.session_state.user_id, st.session_state.session_id, summary)
+                except: pass
+        else:
+            summary_obj = st.session_state.get("summary_obj")
+            if summary_obj is None or not hasattr(summary_obj, "file_name"):
+                summary_obj = lida.summarize(lida_csv_path, summary_method="default", textgen_config=textgen_config)
+                st.session_state.summary_obj = summary_obj
+            summary = st.session_state.summary
+            overview = st.session_state.overview
+            goals = st.session_state.get("goals", [])
+
+        with st.expander("Data Overview & Schema", expanded=False):
+            st.write(overview)
+            st.json(summary)
+
+        st.markdown("<div class='assistant-workspace'>", unsafe_allow_html=True)
+        st.markdown("<div class='compact-label'>", unsafe_allow_html=True)
+        st.markdown("#### Recommended Questions")
+        st.caption("Pick one to send it into the assistant chat.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        sg_col1, sg_col2 = st.columns(2)
+        with sg_col1:
+            if goals and len(goals) > 0 and st.button(f"{goals[0].question}", key="goal_0", use_container_width=True):
+                st.session_state.chat_input_val = goals[0].question
+        with sg_col2:
+            if goals and len(goals) > 1 and st.button(f"{goals[1].question}", key="goal_1", use_container_width=True):
+                st.session_state.chat_input_val = goals[1].question
+
+        st.markdown("<div class='compact-label'>", unsafe_allow_html=True)
+        st.markdown("#### AI Chat Assistant")
+        st.caption("Generate charts and refine your analysis through conversation.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        chat_container = st.container(height=430)
+
+        if "workspace_chat" not in st.session_state:
+            st.session_state.workspace_chat = [
+                {"role": "assistant", "content": "Hello! I've analyzed your data. What would you like to visualize?"}
+            ]
+
+        with chat_container:
+            for msg in st.session_state.workspace_chat:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+        chart_type_choices = get_chart_type_choices()
+        with st.form(key="chat_form", clear_on_submit=True):
+            chart_type_choice = st.selectbox(
+                "Visualization type",
+                options=chart_type_choices,
+                index=0,
+                help="Choose Auto to let the AI select the best chart, or force a specific visualization type.",
+            )
+            user_input = st.text_input("Message the assistant...", placeholder="E.g. Plot a bar chart of sales by region")
+            col_sb1, col_sb2 = st.columns([4, 1])
+            with col_sb1:
+                submit_chat = st.form_submit_button("Generate Chart", type="primary", use_container_width=True)
+            with col_sb2:
+                clear_chat = st.form_submit_button("Clear", use_container_width=True)
+
+        if clear_chat:
+            st.session_state.workspace_chat = [{"role": "assistant", "content": "Hello! I've analyzed your data. What would you like to visualize?"}]
+            st.session_state.chart_raster = None
+            st.session_state.chart_code = None
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Determine if we should run generation
+    query = user_input if submit_chat and user_input else st.session_state.get("chat_input_val")
+    generate_trigger = submit_chat and user_input or st.session_state.get("chat_input_val")
+    
+    # Consume chat_input_val so it doesn't loop
+    if "chat_input_val" in st.session_state:
+        del st.session_state["chat_input_val"]
+
+    with col_right:
+        st.markdown("<div class='viz-output-pane'>", unsafe_allow_html=True)
+        chart_container = st.container()
+        
+        # Trigger Generation
+        if generate_trigger and query:
+            # Append user message
+            st.session_state.workspace_chat.append({"role": "user", "content": query})
+            
+            with chart_container:
+                with st.spinner("Analyzing query and generating chart..."):
+                    # Validate
+                    validated = validate_user_query(query, summary, load_json("chart_selection.json")["VALIDATION_RULES"])
+                    if validated.get("Valid") != "Yes":
+                        error_msg = f"Invalid query: {validated.get('Reason', 'Unknown error')}"
+                        st.error(error_msg)
+                        st.session_state.workspace_chat.append({"role": "assistant", "content": f"❌ {error_msg}"})
+                    else:
+                        st.session_state.validated = validated
+                        chart_types_str = validated.get('All Chart Types', validated.get('Recommended chart', 'Bar/Column Chart'))
+                        st.session_state.chart_options = [c.strip() for c in chart_types_str.split(",") if c.strip()] or ["Bar Chart"]
+
+                        chart_selected = (
+                            chart_type_choice
+                            if chart_type_choice and chart_type_choice != "Auto (recommended)"
+                            else st.session_state.chart_options[0]
                         )
-                        if not updated_list:
-                            st.warning("⚠️ Refinement failed. Please try phrasing your request differently.")
-                            st.stop()
-                        updated = updated_list[0]
-                        refine_response_time = time.time() - refine_start_time
-                        updated_img = base64_to_image(updated.raster)
-                        chart_placeholder.image(updated_img, use_container_width=True)
+                        refined = build_fast_chart_goal(query, chart_selected)
                         
-                        # Log to analytics module - chart refinement
-                        try:
-                            log_interaction(
-                                st.session_state.get("user_id") or st.session_state.get("admin_id"),
-                                st.session_state.username,
-                                st.session_state.session_id,
-                                "chart_refinement",
-                                {
-                                    "instruction_preview": extra[:50],
-                                    "response_time_seconds": round(refine_response_time, 2)
-                                }
-                            )
-                        except Exception as e:
-                            pass
+                        st.session_state.last_refined_query = refined
+                        st.session_state.last_chart_selected = chart_selected
+                        
+                        st.session_state.workspace_chat.append({"role": "assistant", "content": f"Generating a `{chart_selected}` chart..."})
+
+                        query_start = time.time()
+                        charts = lida.visualize(summary=summary_obj, goal=refined, textgen_config=textgen_config, library="seaborn")
+                        
+                        if charts:
+                            final_chart = charts[0]
+                            generation_seconds = time.time() - query_start
+                            st.session_state.chart_code = final_chart.code
+                            st.session_state.chart_raster = final_chart.raster
+                            
+                            st.session_state.workspace_chat.append({"role": "assistant", "content": f"✅ Chart generated in {generation_seconds:.1f}s. You can view it on the right and refine it below if needed."})
+                            
+                            # Logging
+                            try:
+                                img_data = BytesIO()
+                                img = base64_to_image(final_chart.raster)
+                                img.save(img_data, format='PNG')
+                                db.log_visualization(st.session_state.user_id, st.session_state.current_dataset_id, chart_selected, [], query, "generated")
+                                save_chat_message(st.session_state.user_id, st.session_state.session_id, "user", query)
+                            except: pass
+            st.rerun()
+
+        # Render Chart if exists
+        if st.session_state.get("chart_raster"):
+            with chart_container:
+                img = base64_to_image(st.session_state.chart_raster)
+                st.markdown("<div class='compact-label'>", unsafe_allow_html=True)
+                st.markdown("#### Generated Chart")
+                st.caption("The latest visualization generated from your assistant conversation.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown("<div class='ds-card' style='margin-bottom: 15px;'>", unsafe_allow_html=True)
+                st.image(img, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown("#### Refine Your Chart")
+                with st.form(key="refine_form", clear_on_submit=True):
+                    extra = st.text_input("Additional instructions", placeholder="e.g. 'Make the bars green'")
+                    refine_btn = st.form_submit_button("Update Chart", use_container_width=True)
+
+                if st.session_state.get("validated"):
+                    with st.expander("AI Visualization Details"):
+                        v = st.session_state.validated
+                        st.write(f"**Variables:** {v.get('All Variables involved', '')}")
+                        st.write(f"**Relationship:** {v.get('Relationship between variables', '')}")
+                        st.write(f"**Recommended Chart:** {v.get('Recommended chart', '')}")
+                        st.write(f"**Justification:** {v.get('Justification', '')}")
+
+                with st.expander("View Generated Code"):
+                    st.code(st.session_state.chart_code, language="python")
+
+                if refine_btn and extra.strip() and st.session_state.get("chart_code"):
+                    st.session_state.workspace_chat.append({"role": "user", "content": f"Update chart: {extra}"})
+                    with st.spinner("Applying refinements..."):
+                        instr = [
+                            "Keep the existing chart type and data mappings unless the user explicitly asks to change them.",
+                            "Keep the chart readable and fully fitted in the rendered image.",
+                            "Use a large readable figure size, tight_layout/constrained_layout, non-overlapping legend placement, and rotated/wrapped labels when needed.",
+                            "Additionally apply this user request:",
+                            extra,
+                        ]
+                        updated_charts = lida.edit(code=st.session_state.chart_code, summary=summary_obj, instructions=instr, library="seaborn", textgen_config=textgen_config)
+                        if updated_charts:
+                            st.session_state.chart_code = updated_charts[0].code
+                            st.session_state.chart_raster = updated_charts[0].raster
+                            st.session_state.workspace_chat.append({"role": "assistant", "content": "✅ Chart updated successfully!"})
+                        else:
+                            st.warning("⚠️ Refinement failed.")
+                            st.session_state.workspace_chat.append({"role": "assistant", "content": "⚠️ Failed to apply refinement."})
+                    st.rerun()
+        else:
+            with chart_container:
+                if not generate_trigger:
+                    render_magic_empty_canvas(
+                        title="Visualization Canvas",
+                        description="Your generated chart will appear here. Ask a question in the chat to get started.",
+                        key="empty_canvas_loaded",
+                    )
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # --------------------- Main App Setup ---------------------
 
@@ -1221,46 +1905,7 @@ def run_viz_generator():
 
 
 # --------------------- Shared CSS ---------------------
-st.markdown(
-    """
-    <style>
-    :root {
-        --brand-primary: #4F46E5;   /* Indigo 600 */
-        --brand-accent: #10B981;    /* Emerald 500 */
-        --text-light: #F8FAFC;      /* Slate 50 */
-        --text-mid: #CBD5E1;        /* Slate 300 */
-        --bg-hero-start: #3730A3;   /* Indigo 700 */
-        --bg-hero-end: #047857;     /* Emerald 700 */
-    }
 
-    /* Sidebar menu overrides */
-    .sidebar .menu-container {
-        padding: 1rem 0;
-    }
-    .sidebar .nav-link {
-        font-size: 1rem !important;
-        color: var(--brand-primary) !important;
-        margin: 0.5rem 0 !important;
-    }
-    .sidebar .nav-link:hover {
-        background-color: rgba(79, 70, 229, 0.1) !important;
-    }
-    .sidebar .nav-link-selected {
-        background-color: var(--brand-primary) !important;
-        color: var(--text-light) !important;
-    }
-    .sidebar .icon {
-        color: var(--brand-primary) !important;
-        font-size: 1.25rem !important;
-    }
-
-    /* (Rest of your Home page CSS here…) */
-    /* Hero, features, buttons, footer… */
-    /* … */
-    </style>
-    """,
-    unsafe_allow_html=True
-)
 
 # ——— Sidebar ———
 with st.sidebar:
@@ -1272,28 +1917,10 @@ with st.sidebar:
     b64_home = base64.b64encode(data).decode()
 
     st.markdown(f"""
-<div style="
-    text-align: center;
-    padding: 0.5rem 0 0.25rem 0;
-    background-color: #FFFFFF;
-    border-bottom: 0.5px solid #E3E3E3;
-">
-  <img
-    src="data:image/png;base64,{b64_home}"
-    alt="logo"
-    width="80"
-    style="
-      margin: 0.5 0 0 0.1rem;  
-      width: 80px;
-      height: auto;
-    "
-  />
-  <h2 style="
-      margin: 0 2rem 0 0;             /* no top or bottom margin */
-      color: #0066CC;
-      font-family: Arial, sans-serif;
-      line-height: 1.2;      /* tighten line height */
-  ">
+<div style="text-align: center; padding: 0.5rem 0 0.25rem 0; border-bottom: 1px solid #E2E8F0;">
+  <img src="data:image/png;base64,{b64_home}" alt="VisualStats logo" width="72"
+    style="margin: 0.5rem auto; display: block;" />
+  <h2 style="margin: 0.25rem 0 0.75rem; color: #1E40AF; font-family: 'Fira Sans', sans-serif; font-size: 1.25rem; font-weight: 700;">
     VisualStats
   </h2>
 </div>
@@ -1312,436 +1939,357 @@ with st.sidebar:
     menu_options.append("Logout")
     menu_icons.append("box-arrow-right")
     
+    # Determine the current index for programmatic navigation.
+    # On normal Streamlit reruns (file upload, form submit, chart generation), option_menu
+    # recreates itself. Preserve the last selected menu instead of falling back to Home.
+    if "force_menu_index" in st.session_state:
+        default_index = st.session_state["force_menu_index"]
+    else:
+        current_choice = st.session_state.get("menu_choice", "Home")
+        default_index = menu_options.index(current_choice) if current_choice in menu_options else 0
+    if "force_menu_index" in st.session_state:
+        del st.session_state["force_menu_index"]
+
     menu = option_menu(
     menu_title=None,
     options=menu_options,
     icons=menu_icons,
-    default_index=0,
+    default_index=default_index,
     orientation="vertical",
     styles={
         "container": {
-            "padding": "1rem 0.5rem",
-            "background-color": "#FFFFFF",
-            "border-right": "1px solid #E3E3E3"
+            "padding": "0.75rem 0.5rem",
+            "background-color": "transparent",
         },
-        # default icon color
         "nav-link-icon": {
-            "color": "#0066CC",
-            "font-size": "1.3rem",
+            "color": "#3B82F6",
+            "font-size": "1.1rem",
             "margin": "0 0.5rem 0 0"
         },
-        # each link (text)
         "nav-link": {
-            "font-size": "1.05rem",
+            "font-size": "0.95rem",
             "text-align": "left",
-            "margin": "0.25rem 0",
-            "padding": "0.5rem 1rem",
-            "border-radius": "0.5rem",
-            "color": "#333333"
+            "margin": "0.2rem 0",
+            "padding": "0.5rem 0.75rem",
+            "border-radius": "8px",
+            "color": "#334155"
         },
-        # hover state (link + icon both pick this up)
         "nav-link:hover": {
-            "background-color": "#F1F1F1",
-            "color": "#000000"
+            "background-color": "#F1F5F9",
+            "color": "#1E40AF"
         },
-        # selected link background + text
         "nav-link-selected": {
-            "background-color": "#0066CC",
+            "background-color": "#1E40AF",
             "color": "#FFFFFF",
-            "font-weight": "bold"
+            "font-weight": "600"
         },
-        # and here’s the magic – selected icon turns white
         "nav-link-selected-icon": {
             "color": "#FFFFFF"
         }
     }
 )
 
+    st.session_state.menu_choice = menu
+
+    # ---------------- Sidebar Enhancements ----------------
+    user_id = st.session_state.get("user_id")
+    
+    st.markdown("#### Active Datasets")
+    if user_id:
+        try:
+            datasets = db.get_user_datasets(user_id, limit=5)
+            if datasets:
+                for d in datasets:
+                    size_kb = d.get('file_size_bytes', 0) / 1024
+                    st.markdown(
+                        f"<div class='sidebar-section'><b>{d['dataset_name']}</b><br><span style='color:#64748B'>{size_kb:.1f} KB</span></div>",
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("No datasets uploaded yet.")
+        except Exception:
+            st.caption("No datasets uploaded yet.")
+
+    st.markdown("<hr style='margin: 1rem 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
+    st.markdown("#### Recent Sessions")
+    if user_id:
+        sessions = db.get_user_conversations(user_id, limit=3)
+        if sessions:
+            for s in sessions:
+                q = s.get("user_query", "Session")
+                if len(q) > 25:
+                    q = q[:25] + "..."
+                st.markdown(f"<div class='sidebar-section'>{q}</div>", unsafe_allow_html=True)
+        else:
+            st.caption("No chat history yet.")
+
+    st.markdown("<hr style='margin: 1rem 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
+    st.markdown("#### Saved Visualizations")
+    if user_id:
+        viz = db.get_user_visualizations(user_id, limit=3)
+        if viz:
+            for v in viz:
+                st.markdown(
+                    f"<div class='sidebar-section'>{v.get('viz_type', 'Chart')}</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No saved visualizations yet.")
+
+    st.markdown("<hr style='margin: 1rem 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
+    st.markdown("#### Profile")
+    st.markdown(
+        f"<div class='sidebar-section'><b>{st.session_state.get('username', 'Guest')}</b><br>"
+        f"<span style='color:#64748B'>{str(st.session_state.get('role', 'User')).capitalize()}</span></div>",
+        unsafe_allow_html=True,
+    )
+    
 # --------------------- Home Page Renderer ---------------------
 
-# Load and encode images
-with open("viz_gen.png", "rb") as f:
-    data = f.read()
-b64_gen = base64.b64encode(data).decode()
-
-with open("viz_eval.png", "rb") as f:
-    data = f.read()
-b64_eval = base64.b64encode(data).decode()
-
 def render_home():
-    st.markdown(
-        """
-        <style>
-        /* Hero */
-        .hero {
-            position: relative;
-            background: linear-gradient(135deg, #0066CC, #0052A3);
-            height: 25vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            color: white;
-        }
-        .hero-content h1 {
-            font-size: 3.5rem;
-            margin: 0.5rem 0;
-            font-weight: 800;
-        }
-        .hero-content p {
-            font-size: 1.3rem;
-            margin: 1rem 0 0;
-            color: rgba(255,255,255,0.95);
-            font-weight: 500;
-        }
-        .btn-primary, .btn-secondary {
-            border: none;
-            padding: 0.75rem 1.5rem;
-            font-size: 1rem;
-            border-radius: 0.5rem;
-            cursor: pointer;
-            transition: opacity 0.2s;
-        }
-        .btn-primary {
-            background-color: var(--brand-primary);
-            color: var(--text-light);
-        }
-        .btn-primary:hover { opacity: 0.85; }
-        .btn-secondary {
-            background-color: var(--text-light);
-            color: var(--brand-primary);
-            border: 2px solid var(--brand-primary);
-        }
-        .btn-secondary:hover { opacity: 0.85; }
+    """Renders the React-powered task-first dashboard."""
+    from magic_wrapper import render_magic_dashboard
+    from platform_stats import get_platform_dashboard_stats
 
-        /* Features grid */
-        .features {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 2rem;
-            margin: 3rem 0;
+    st.markdown("""
+    <style>
+        /* Full-bleed home — hide sidebar so landing uses the whole viewport */
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"] {
+            display: none !important;
         }
-        .feature-card {
-            background-color: white;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-            padding: 2rem 1.5rem;
-            text-align: center;
-            transition: transform 0.3s, box-shadow 0.3s;
-            border: 1px solid #E2E8F0;
+        .stApp, .stMain, [data-testid="stAppViewContainer"] {
+            background-color: #fbfbfa !important;
+            max-width: 100vw !important;
+            overflow-x: hidden !important;
         }
-        .feature-card:hover {
-            transform: translateY(-6px);
-            box-shadow: 0 12px 24px rgba(0, 102, 204, 0.15);
+        [data-testid="stAppViewContainer"] > section.main {
+            width: 100% !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
         }
-        .feature-icon {
-            font-size: 3rem;
-            margin-bottom: 1rem;
+        .stMainBlockContainer {
+            padding: 0 !important;
+            max-width: 100% !important;
+            width: 100% !important;
+            background-color: #fbfbfa !important;
         }
-        .feature-title {
-            font-size: 1.2rem;
-            margin-bottom: 0.75rem;
-            color: #1E293B;
-            font-weight: 700;
+        [data-testid="stMain"] {
+            padding: 0 !important;
+            width: 100% !important;
+            max-width: 100% !important;
         }
-        .feature-desc {
-            color: #64748B;
-            font-size: 0.95rem;
-            line-height: 1.6;
+        .stMainBlockContainer > div { gap: 0 !important; }
+        iframe[title="magic_hub.magic_hub"] {
+            width: 100% !important;
+            max-width: 100% !important;
+            border: none !important;
+            display: block !important;
+            overflow: hidden !important;
         }
+        div[data-testid="stCustomComponentV1"] {
+            background-color: #fbfbfa !important;
+            overflow: hidden !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        [data-testid="stVerticalBlock"] {
+            gap: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            width: 100% !important;
+        }
+        [data-testid="stElementContainer"] {
+            margin: 0 !important;
+            padding: 0 !important;
+            width: 100% !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
 
-        /* Footer */
-        .footer {
-            text-align: center;
-            padding: 1.5rem 0;
-            color: var(--text-mid);
-            font-size: 0.875rem;
-        }
-        .footer a {
-            color: var(--brand-primary);
-            text-decoration: none;
-        }
-        .footer a:hover {
-            text-decoration: underline;
-        }
-         /* Images grid */
-        .images-grid {
-            margin: 3rem 0;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2.5rem;
-        }
-        .image-card {
-            background-color: white;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-            overflow: hidden;
-            border: 1px solid #E2E8F0;
-            transition: transform 0.3s, box-shadow 0.3s;
-        }
-        .image-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 12px 24px rgba(0, 102, 204, 0.12);
-        }
-        .image-card img {
-            width: 100%;
-            height: auto;
-            display: block;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
+    is_admin = st.session_state.get("role") == "admin"
+    username = st.session_state.get("username", "Guest")
+
+    user_id = st.session_state.get("user_id")
+    recent_datasets = []
+    recent_sessions = []
+    recent_viz = []
+
+    if user_id:
+        try:
+            db_conn = get_db()
+            recent_datasets = db_conn.get_user_datasets(user_id, limit=3)
+            recent_sessions = db_conn.get_user_conversations(user_id, limit=3)
+            recent_viz = db_conn.get_user_visualizations(user_id, limit=3)
+            all_datasets = db_conn.get_user_datasets(user_id, limit=100)
+            all_sessions = db_conn.get_user_conversations(user_id, limit=100)
+            all_viz = db_conn.get_user_visualizations(user_id, limit=100)
+        except Exception as e:
+            print(f"Error fetching recent activity for dashboard: {e}")
+            all_datasets, all_sessions, all_viz = [], [], []
+    else:
+        all_datasets, all_sessions, all_viz = [], [], []
+
+    chart_type_counts: dict = {}
+    for v in all_viz:
+        vt = v.get("viz_type") or "Unknown"
+        chart_type_counts[vt] = chart_type_counts.get(vt, 0) + 1
+    user_chart_types = [
+        {"viz_type": k, "count": c}
+        for k, c in sorted(chart_type_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    ]
+
+    supported_charts: list = []
+    try:
+        chart_rules = load_json("chart_selection.json").get("VALIDATION_RULES", {})
+        for category in chart_rules.values():
+            for charts in category.values():
+                supported_charts.extend(charts)
+        supported_charts = list(dict.fromkeys(supported_charts))
+    except Exception:
+        supported_charts = [
+            "Bar Chart", "Line Chart", "Scatter Plot", "Pie Chart",
+            "Histogram", "Heatmap", "Box Plot", "Area Chart",
+        ]
+
+    # All-time platform totals from Supabase + local SQLite
+    platform_stats = get_platform_dashboard_stats()
+    top_chart_types = platform_stats.get("top_chart_types") or user_chart_types
+
+    dashboard_stats = {
+        "datasets": platform_stats.get("datasets", 0),
+        "sessions": platform_stats.get("chat_queries", 0),
+        "visualizations": platform_stats.get("visualizations", 0),
+        "users": platform_stats.get("users", 0),
+        "interactions": platform_stats.get("interactions", 0),
+    }
+
+    nav_event = render_magic_dashboard(
+        key="magic_dashboard",
+        is_admin=is_admin,
+        username=username,
+        datasets=recent_datasets,
+        sessions=recent_sessions,
+        visualizations=recent_viz,
+        stats=dashboard_stats,
+        chart_types=top_chart_types,
+        supported_charts=supported_charts,
     )
-
-    # Hero
-    st.markdown(
-        """
-        <div class="hero">
-          <div class="hero-content">
-            <h1>VisualStats</h1>
-            <p>Bridge Gap Between Data & Decision with AI‑Driven Visualizations</p>
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # new images grid
-    # 3) Inject your images via an f‑string
-    html = f"""
     
-    <div class="images-grid">
-    <div class="image-card">
-        <img src="data:image/png;base64,{b64_gen}" alt="Viz Generator"/>
-    </div>
-    <div class="image-card">
-        <img src="data:image/png;base64,{b64_eval}" alt="Viz Evaluator"/>
-    </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    # Handle navigation events from the mode card "Get Started" buttons
+    if nav_event:
+        action = nav_event.get("action")
+        target = nav_event.get("target")
+        timestamp = nav_event.get("timestamp")
+        last_ts = st.session_state.get("last_nav_timestamp")
+        
+        if timestamp and timestamp != last_ts:
+            st.session_state.last_nav_timestamp = timestamp
+            if action == "logout":
+                perform_logout()
+            elif action == "navigate" and target == "home":
+                st.session_state.menu_choice = "Home"
+                st.session_state.force_menu_index = 0
+                st.rerun()
+            elif action == "navigate" and target == "viz_generator":
+                # Trigger a menu option switch
+                st.session_state.menu_choice = "Viz Generator"
+                # Need to force a rerun so the sidebar menu updates and the app routes properly
+                # Normally with option_menu, switching programmatically requires passing default_index
+                # We'll set a state var to override the index
+                st.session_state.force_menu_index = 1
+                st.rerun()
+            elif action == "navigate" and target == "viz_evaluator":
+                st.session_state.menu_choice = "Viz Evaluator"
+                st.session_state.force_menu_index = 2
+                st.rerun()
+            elif action == "navigate" and target == "analytics_dashboard":
+                st.session_state.menu_choice = "Analytics Dashboard"
+                st.session_state.force_menu_index = 3
+                st.rerun()
 
 # --------------------- Analytics Dashboard Renderer ---------------------
 def render_analytics():
     """Render the analytics dashboard with platform statistics from Supabase."""
-    st.markdown(
-        """
-        <style>
-        /* Impeccable Design System CSS for Analytics Dashboard */
-        .ds-card {
-            background: white;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            border: 1px solid #E2E8F0;
-            margin-bottom: 15px;
-            font-family: system-ui, sans-serif;
-            text-align: center;
-        }
-        .ds-card h4 {
-            color: #0052A3;
-            margin-top: 0;
-            margin-bottom: 10px;
-            font-weight: 700;
-        }
-        .ds-card p {
-            margin: 0;
-            color: #1E293B;
-            line-height: 1.6;
-        }
-        .ds-section-header {
-            background: linear-gradient(135deg, #0066CC, #0052A3);
-            color: white;
-            padding: 20px;
-            border-radius: 10px;
-            font-size: 18px;
-            font-weight: 700;
-            margin: 20px 0;
-            font-family: system-ui, sans-serif;
-            text-align: center;
-        }
-        .metric-value {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: #0066CC;
-            margin: 0.5rem 0;
-        }
-        .metric-label {
-            color: #64748B;
-            font-size: 1.1rem;
-            font-weight: 600;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    
-    st.markdown(
-        """
-        <div class="ds-section-header" style="height: auto; margin-bottom: 2rem;">
-          <h1 style="color: white; margin: 0; font-size: 2.5rem;">📊 Analytics Dashboard</h1>
-          <p style="color: rgba(255,255,255,0.9); font-weight: 500; font-size: 1.2rem; margin: 0.5rem 0 0 0;">Platform Statistics & User Behavior Insights</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    
+    from magic_wrapper import render_magic_analytics
     from analytics import get_all_sessions
     from chat_storage import get_all_user_chats, get_chat_history
     from auth import get_all_user_profiles
+    from platform_stats import get_platform_dashboard_stats
 
-    # Get statistics from Supabase
+    inject_magic_page_styles("analytics")
+    render_page_actions(active="analytics_dashboard")
+
     user_profiles = get_all_user_profiles()
     total_users = len(user_profiles)
-    
+
     all_sessions = get_all_sessions()
     total_visualizations = 0
     total_datasets = 0
     total_interactions = 0
     total_duration_seconds = 0
     duration_count = 0
-    
+
     action_counts = {}
     chart_counts = {}
-    
+
     for s in all_sessions:
         interactions = s.get("interactions", [])
         total_interactions += len(interactions)
-        
+
         for i in interactions:
             action = i.get("action", "unknown")
             action_counts[action] = action_counts.get(action, 0) + 1
-            
-            # Aggregate datasets and visualizations dynamically based on action types
+
             if action in ["dataset_upload", "file_upload"]:
                 total_datasets += 1
             elif action in ["chart_generated", "ai_query", "chart_refinement", "chart_evaluation"]:
                 total_visualizations += 1
-            
+
         dur = s.get("duration_seconds")
         if dur is not None:
             total_duration_seconds += dur
             duration_count += 1
-            
-    # Need to aggregate charts from chats because metrics alone don't give chart types
+
     all_chats = []
     for uid in user_profiles.keys():
         user_chats = get_all_user_chats(uid)
         all_chats.extend(user_chats)
-        
+
     for c in all_chats:
         chat_hist = get_chat_history(c.get("user_id", uid), c.get("session_id", ""))
         if chat_hist:
             for img in chat_hist.get("generated_images", []):
                 ctype = img.get("chart_type", "Unknown")
                 chart_counts[ctype] = chart_counts.get(ctype, 0) + 1
-            
-    avg_session_duration = total_duration_seconds / duration_count if duration_count > 0 else 0
-    
-    top_actions = [{"action_type": k, "count": v} for k, v in sorted(action_counts.items(), key=lambda x: x[1], reverse=True)[:5]]
-    top_chart_types = [{"viz_type": k, "count": v} for k, v in sorted(chart_counts.items(), key=lambda x: x[1], reverse=True)[:5]]
-    
-    # Display key metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(
-            f"""
-            <div class="ds-card">
-                <div class="metric-label">👥 Total Users</div>
-                <div class="metric-value">{total_users}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    with col2:
-        st.markdown(
-            f"""
-            <div class="ds-card">
-                <div class="metric-label">📊 Visualizations</div>
-                <div class="metric-value">{total_visualizations}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    with col3:
-        st.markdown(
-            f"""
-            <div class="ds-card">
-                <div class="metric-label">📂 Datasets</div>
-                <div class="metric-value">{total_datasets}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    with col4:
-        st.markdown(
-            f"""
-            <div class="ds-card">
-                <div class="metric-label">📈 Interactions</div>
-                <div class="metric-value">{total_interactions}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    # Top chart types
-    st.subheader("📊 Top Chart Types Used")
-    if top_chart_types:
-        import pandas as pd
-        import plotly.express as px
-        
-        df_charts = pd.DataFrame(top_chart_types)
-        
-        # Create a beautiful Plotly bar chart
-        fig = px.bar(
-            df_charts, 
-            x='viz_type', 
-            y='count',
-            color='viz_type',
-            text='count',
-            labels={'viz_type': 'Chart Type', 'count': 'Visualizations Generated'},
-            color_discrete_sequence=px.colors.qualitative.Pastel
-        )
-        fig.update_traces(textposition='outside', textfont_size=14)
-        fig.update_layout(
-            xaxis_title="",
-            yaxis_title="Count",
-            showlegend=False,
-            height=400,
-            margin=dict(t=20, b=20, l=0, r=0)
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("View Detailed List"):
-            for idx, item in enumerate(top_chart_types, 1):
-                st.write(f"{idx}. **{item['viz_type']}**: {item['count']} visualizations")
-    # Average session duration
-    st.subheader("⏱️ Session Statistics")
-    if avg_session_duration:
-        minutes = int(avg_session_duration // 60)
-        seconds = int(avg_session_duration % 60)
-        st.metric("Average Session Duration", f"{minutes}m {seconds}s")
-    else:
-        st.info("No session data available yet.")
-    
-    # Top actions
-    st.subheader("🎯 Most Common User Actions")
-    if top_actions:
-        action_data = [(item['action_type'], item['count']) for item in top_actions]
-        for idx, (action, count) in enumerate(action_data, 1):
-            st.write(f"{idx}. **{action}**: {count} times")
-    else:
-        st.info("No interaction data available yet.")
-    
-    st.markdown("---")
-    st.subheader("👤 Detailed User Analysis")
-    st.markdown("Select a user to review their specific questions asked and visualizations generated.")
-    
+    avg_session_duration = total_duration_seconds / duration_count if duration_count > 0 else 0
+    avg_display = f"{int(avg_session_duration // 60)}m {int(avg_session_duration % 60)}s" if avg_session_duration else "—"
+
+    platform_stats = get_platform_dashboard_stats()
+    total_users = max(total_users, platform_stats.get("users", 0))
+    total_visualizations = max(total_visualizations, platform_stats.get("visualizations", 0))
+    total_datasets = max(total_datasets, platform_stats.get("datasets", 0))
+    total_interactions = max(total_interactions, platform_stats.get("interactions", 0))
+    top_chart_types = platform_stats.get("top_chart_types") or [
+        {"viz_type": k, "count": v}
+        for k, v in sorted(chart_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    ]
+
+    render_magic_analytics(
+        total_users=total_users,
+        total_visualizations=total_visualizations,
+        total_datasets=total_datasets,
+        total_interactions=total_interactions,
+        avg_session_duration=avg_display,
+        top_chart_types=top_chart_types,
+        key="analytics_header",
+    )
+
     active_user_ids = list(user_profiles.keys())
     
     if active_user_ids:
@@ -1750,14 +2298,31 @@ def render_analytics():
         for uid in active_user_ids:
             name = user_profiles.get(uid, f"Guest / Unknown ({uid[:8]})")
             user_options[f"{name}"] = uid
-            
+
+        st.markdown(
+            f'<div class="analytics-selector-panel">'
+            f'<span>User Activity</span>'
+            f'<h3>Select a user to inspect activity.</h3>'
+            f'<p>Choose a user, then review their questions, platform actions, generated charts, and evaluator uploads in the visual activity sheet below.</p>'
+            f'<b>{len(user_options)} users available</b>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         selected_label = st.selectbox("Select User Activity:", options=["-- Select a User --"] + list(user_options.keys()))
         
         if selected_label and selected_label != "-- Select a User --":
             selected_user_id = user_options[selected_label]
             
             import datetime
-            st.markdown("##### 📅 Filter Activity by Date")
+            st.markdown(
+                """
+                <div class="analytics-filter-heading">
+                    <span>Filter Activity</span>
+                    <p>Narrow the audit window before reviewing conversations, clicks, and visual assets.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             col_d1, col_d2 = st.columns(2)
             with col_d1:
                 start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
@@ -1767,11 +2332,10 @@ def render_analytics():
             start_dt = datetime.datetime.combine(start_date, datetime.time.min)
             end_dt = datetime.datetime.combine(end_date, datetime.time.max)
             
-            tab1, tab2, tab3 = st.tabs(["💬 Questions & AI Conversations", "🖱️ Platform Interactions", "🖼️ Visualizations & Images"])
+            tab1, tab2, tab3 = st.tabs(["Questions & AI Conversations", "Platform Interactions", "Visualizations & Images"])
 
             with tab1:
                 from chat_storage import get_all_user_chats, get_chat_history
-                import pandas as pd
                 
                 chats = get_all_user_chats(selected_user_id)
                 conv_data = []
@@ -1809,22 +2373,23 @@ def render_analytics():
                             
                         cols_to_show = ["timestamp", "user_query", "chart_type", "visualization_generated"]
                         cols_to_show = [c for c in cols_to_show if c in df_conv.columns]
-                        st.dataframe(
+                        render_visual_activity_sheet(
                             df_conv[cols_to_show],
-                            use_container_width=True,
-                            column_config={
+                            cols_to_show,
+                            {
                                 "timestamp": "Time",
                                 "user_query": "Question Asked",
                                 "chart_type": "Chart Generated",
-                                "visualization_generated": "Success"
-                            }
+                                "visualization_generated": "Success",
+                            },
+                            "Questions & AI Conversations",
+                            "Recent user prompts and whether they produced a visualization.",
                         )
                 else:
                     st.info("No questions or conversations logged in this date range.")
                     
             with tab2:
                 from analytics import get_all_user_sessions
-                import pandas as pd
                 user_sessions = get_all_user_sessions(selected_user_id)
                 int_data = []
                 for s in user_sessions:
@@ -1856,26 +2421,34 @@ def render_analytics():
                             
                         cols_to_interact = ["timestamp", "action_type", "action_details"]
                         cols_to_interact = [c for c in cols_to_interact if c in df_int.columns]
-                        st.dataframe(
-                            df_int[cols_to_interact], 
-                            use_container_width=True,
-                            column_config={
+                        render_visual_activity_sheet(
+                            df_int[cols_to_interact],
+                            cols_to_interact,
+                            {
                                 "timestamp": "Time",
                                 "action_type": "Action",
-                                "action_details": "Details"
-                            }
+                                "action_details": "Details",
+                            },
+                            "Platform Interactions",
+                            "Tracked clicks, uploads, generations, refinements, and evaluator activity.",
                         )
                 else:
                     st.info("No clicks or interactions logged in this date range.")
                     
             with tab3:
-                import pandas as pd
                 chats = get_all_user_chats(selected_user_id)
                 found_images = False
                 
                 if chats:
-                    st.markdown("### User Visualizations")
-                    st.markdown("Images generated by the AI platform and images uploaded by the user for evaluation.")
+                    st.markdown(
+                        """
+                        <div class="analytics-filter-heading">
+                            <span>User Visualizations</span>
+                            <p>Images generated by the AI platform and images uploaded by the user for evaluation.</p>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
                     
                     for chat in chats:
                         chat_hist = get_chat_history(selected_user_id, chat.get("session_id", ""))
@@ -1894,7 +2467,7 @@ def render_analytics():
                                         pass
                                         
                                 found_images = True
-                                st.markdown("---")
+                                st.markdown("<div class='analytics-image-card'>", unsafe_allow_html=True)
                                 st.write(f"**Query/Context:** {img.get('user_query', 'N/A')}")
                                 
                                 if gen_time:
@@ -1911,6 +2484,7 @@ def render_analytics():
                                         st.image(url, use_container_width=True)
                                 except Exception as e:
                                     st.error(f"Could not load image: {e}")
+                                st.markdown("</div>", unsafe_allow_html=True)
                 
                 if not found_images:
                     st.info("No saved images found for this user in this date range.")
@@ -1919,21 +2493,12 @@ def render_analytics():
 
     st.write("")
     # Refresh button
-    if st.button("🔄 Refresh Statistics", type="primary"):
+    if st.button("Refresh Statistics", type="primary"):
         st.rerun()
 
 # --------------------- Page Routing ---------------------
 if menu == "Logout":
-    # Finalize current session in analytics
-    from auth import end_session
-    finalize_session(st.session_state.get("user_id") or st.session_state.get("admin_id"), st.session_state.session_id)
-    if "session_token" in st.session_state:
-        end_session(st.session_state.session_token)
-    st.session_state.clear()
-    st.success("Logged out successfully!")
-    import time
-    time.sleep(1)
-    st.rerun()
+    perform_logout()
 elif menu == "Home":
     render_home()
 elif menu == "Viz Generator":
@@ -1947,33 +2512,13 @@ elif menu == "Analytics Dashboard":
         st.error("❌ Access Denied: Analytics is only available for administrators")
 
 # Put this once at the top of your app to inject the CSS
-st.markdown("""
-    <style>
-    .footer {
-        position: fixed;
-        left: 10rem;
-        bottom: 0;
-        width: 100%;
-        background-color: #f1f1f1;
-        color: #444;
-        text-align: center;
-        padding: 0.5rem 0;
-        font-size: 0.875rem;
-        box-shadow: 0 -1px 4px rgba(0,0,0,0.1);
-        z-index: 100;
-    }
-    /* Add some padding to the bottom of the main content so it doesn't get hidden */
-    .main-content {
-        padding-bottom: 3rem;
-    }
-    </style>
-""", unsafe_allow_html=True)
+
 
 def render_footer():
     st.markdown(
         """
         <div class="footer">
-            © 2025 VisualStats. All rights reserved.
+            © 2026 VisualStats. All rights reserved.
         </div>
         """,
         unsafe_allow_html=True

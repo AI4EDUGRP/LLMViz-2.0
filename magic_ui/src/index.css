@@ -1,0 +1,11 @@
+@import "./lib/tokens.css";
+@import "tailwindcss";
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
