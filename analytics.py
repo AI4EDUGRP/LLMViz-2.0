@@ -181,7 +181,7 @@ def get_all_sessions() -> List[Dict]:
     return sessions
 
 
-def export_sessions_to_csv(filename: str, sessions_data: List[Dict],
+def export_sessions_to_csv(filename: str, sessions_data: List[Dict], 
                           include_interactions: bool = False) -> bool:
     """Export session data to a CSV file (useful for admin downloads)."""
     if not sessions_data:
