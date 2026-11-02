@@ -31,58 +31,48 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 # ==================== User Management ====================
 def normalize_usf_uid(value: str) -> str | None:
-    """Normalize a USF U-Number (U + 8 digits). Accepts U12345678 or 12345678."""
+    """Normalize a USF U-Number: must start with U and have exactly 8 digits (U12345678)."""
     if not isinstance(value, str):
         return None
     raw = value.strip().upper().replace("-", "").replace(" ", "")
-    if re.fullmatch(r"\d{8}", raw):
-        raw = "U" + raw
     if re.fullmatch(r"U\d{8}", raw):
         return raw
     return None
 
 assert normalize_usf_uid("u12345678") == "U12345678"
-assert normalize_usf_uid("12345678") == "U12345678"
+assert normalize_usf_uid("U12345678") == "U12345678"
+assert normalize_usf_uid("12345678") is None
 assert normalize_usf_uid("bad") is None
 
-def authenticate_user(username: str, password: str) -> dict | str:
+def authenticate_user(username: str, password: str | None = None) -> dict | str:
     """
-    Authenticate a user or create a new one with USF UID + password.
-    `username` is the student's USF UID (U-Number); stored in app_users.username.
-    Password is hashed locally (not verified against USF SSO).
-    Returns: 
-    - user dict if successful (login or register)
-    - string with error message if failed
+    Sign in or register a student with USF UID only (U + 8 digits).
+    `password` is ignored; kept optional for call-site compatibility.
+    Returns user dict, or an error string.
     """
     client = get_supabase_client()
 
     uid = normalize_usf_uid(username)
     if not uid:
-        return "Enter a valid USF UID (U followed by 8 digits, e.g. U12345678)."
-    
-    if not (isinstance(password, str) and len(password.strip()) >= 8):
-        return "USF password must be at least 8 characters."
+        return "Enter a valid USF UID starting with U and 8 digits (e.g. U12345678)."
         
     response = client.table("app_users").select("*").eq("username", uid).eq("is_admin", False).execute()
     
     if len(response.data) > 0:
         user_data = response.data[0]
-        if verify_password(password, user_data["password_hash"]):
-            return {
-                "user_id": user_data["user_id"],
-                "username": user_data["username"],
-                "role": "user",
-                "is_new": False
-            }
-        else:
-            return "Invalid password for this USF UID."
+        return {
+            "user_id": user_data["user_id"],
+            "username": user_data["username"],
+            "role": "user",
+            "is_new": False
+        }
     
-    # Create new user
+    # Create new user (placeholder hash; students no longer use a password)
     user_id = f"user_{str(uuid.uuid4())[:8]}"
     new_user = {
         "user_id": user_id,
         "username": uid,
-        "password_hash": hash_password(password),
+        "password_hash": hash_password(str(uuid.uuid4())),
         "created_at": datetime.now().isoformat(),
         "is_admin": False
     }
