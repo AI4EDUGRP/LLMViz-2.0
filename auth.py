@@ -4,6 +4,7 @@ Handles user/admin signup, login, password hashing, and session token management
 """
 
 import os
+import re
 import uuid
 import hashlib
 from datetime import datetime
@@ -29,23 +30,44 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 # ==================== User Management ====================
-def authenticate_user(username: str, pin: str) -> dict | str:
+def normalize_usf_uid(value: str) -> str | None:
+    """Normalize a USF U-Number (U + 8 digits). Accepts U12345678 or 12345678."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip().upper().replace("-", "").replace(" ", "")
+    if re.fullmatch(r"\d{8}", raw):
+        raw = "U" + raw
+    if re.fullmatch(r"U\d{8}", raw):
+        return raw
+    return None
+
+assert normalize_usf_uid("u12345678") == "U12345678"
+assert normalize_usf_uid("12345678") == "U12345678"
+assert normalize_usf_uid("bad") is None
+
+def authenticate_user(username: str, password: str) -> dict | str:
     """
-    Authenticate a user or create a new one using a 4-digit PIN.
+    Authenticate a user or create a new one with USF UID + password.
+    `username` is the student's USF UID (U-Number); stored in app_users.username.
+    Password is hashed locally (not verified against USF SSO).
     Returns: 
     - user dict if successful (login or register)
     - string with error message if failed
     """
     client = get_supabase_client()
+
+    uid = normalize_usf_uid(username)
+    if not uid:
+        return "Enter a valid USF UID (U followed by 8 digits, e.g. U12345678)."
     
-    if not (isinstance(pin, str) and pin.isdigit() and len(pin) == 4):
-        return "PIN must be exactly 4 digits."
+    if not (isinstance(password, str) and len(password.strip()) >= 8):
+        return "USF password must be at least 8 characters."
         
-    response = client.table("app_users").select("*").eq("username", username).eq("is_admin", False).execute()
+    response = client.table("app_users").select("*").eq("username", uid).eq("is_admin", False).execute()
     
     if len(response.data) > 0:
         user_data = response.data[0]
-        if verify_password(pin, user_data["password_hash"]):
+        if verify_password(password, user_data["password_hash"]):
             return {
                 "user_id": user_data["user_id"],
                 "username": user_data["username"],
@@ -53,14 +75,14 @@ def authenticate_user(username: str, pin: str) -> dict | str:
                 "is_new": False
             }
         else:
-            return "Invalid PIN for this username."
+            return "Invalid password for this USF UID."
     
     # Create new user
     user_id = f"user_{str(uuid.uuid4())[:8]}"
     new_user = {
         "user_id": user_id,
-        "username": username,
-        "password_hash": hash_password(pin),
+        "username": uid,
+        "password_hash": hash_password(password),
         "created_at": datetime.now().isoformat(),
         "is_admin": False
     }
@@ -69,7 +91,7 @@ def authenticate_user(username: str, pin: str) -> dict | str:
     
     return {
         "user_id": user_id,
-        "username": username,
+        "username": uid,
         "role": "user",
         "is_new": True
     }

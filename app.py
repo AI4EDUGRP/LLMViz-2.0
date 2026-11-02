@@ -171,19 +171,19 @@ def auth_dialog():
     tab1, tab2 = st.tabs(["👤 User Login", "🛡️ Admin Portal"])
     
     with tab1:
-        st.markdown("<p style='color: #64748B;'>Sign in, register instantly with your PIN, or continue as guest.</p>", unsafe_allow_html=True)
-        username = st.text_input("Username", placeholder="Enter your username", key="user_name")
-        pin = st.text_input("4-Digit PIN", type="password", max_chars=4, placeholder="****", key="user_pin")
+        st.markdown("<p style='color: #64748B;'>Sign in with your USF UID and password, register instantly, or continue as guest.</p>", unsafe_allow_html=True)
+        username = st.text_input("USF UID", placeholder="U12345678", key="user_name", help="Your USF U-Number (U + 8 digits).")
+        password = st.text_input("USF Password", type="password", placeholder="Enter your USF password", key="user_password")
         
         st.write("")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Login / Register", use_container_width=True, type="primary"):
-                if not username or not pin or len(pin) != 4 or not pin.isdigit():
-                    st.error("Please enter a username and a valid 4-digit PIN.")
+                if not username or not password or len(password.strip()) < 8:
+                    st.error("Please enter your USF UID and password (at least 8 characters).")
                 else:
                     from auth import authenticate_user, create_session
-                    result = authenticate_user(username, pin)
+                    result = authenticate_user(username, password)
                     if isinstance(result, str):
                         st.error(result)  # e.g., Invalid PIN or purely alphabetical
                     else:
