@@ -466,12 +466,21 @@ def raster_to_png_bytes(base64_string: str) -> bytes:
 
 
 def show_chart_image(raster_b64: str, placeholder=None):
-    """Render chart via PNG bytes — avoids broken media placeholders on Streamlit Cloud."""
+    """
+    Render chart as a data-URI <img>.
+    Streamlit Cloud often shows a broken image / "0" with st.image() because
+    media is stored in-memory per replica (MediaFileHandler: Missing file).
+    Embedding base64 bypasses that media manager entirely.
+    """
     png = raster_to_png_bytes(raster_b64)
-    if placeholder is not None:
-        placeholder.image(png, use_container_width=True)
-    else:
-        st.image(png, use_container_width=True)
+    b64 = base64.b64encode(png).decode("ascii")
+    html = (
+        f'<img src="data:image/png;base64,{b64}" '
+        f'style="width:100%;height:auto;display:block;" '
+        f'alt="Generated chart"/>'
+    )
+    # placeholder unused on purpose — st.empty().markdown has the same Cloud media issues
+    st.markdown(html, unsafe_allow_html=True)
     return png
 
 
