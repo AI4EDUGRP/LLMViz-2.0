@@ -17,6 +17,13 @@ from chat_storage import (
     save_chat_message, save_generated_image, save_dataset_summary,
     get_chat_history, get_session_statistics, save_chart_refinement
 )
+from chart_quality import (
+    prepare_dataframe_for_viz,
+    demote_bad_composition_charts,
+    filter_supported_charts,
+    pie_chart_needs_repair,
+    PIE_REPAIR_INSTRUCTIONS,
+)
 import time
 
 # --------------------- Environment Setup ---------------------
@@ -439,6 +446,10 @@ def load_json(path: str) -> dict:
 
 def base64_to_image(base64_string: str) -> Image.Image:
     """Convert a base64 encoded string to a PIL Image."""
+    if not base64_string:
+        raise ValueError("Chart image data is empty.")
+    if isinstance(base64_string, str) and base64_string.startswith("data:"):
+        base64_string = base64_string.split(",", 1)[1]
     return Image.open(BytesIO(base64.b64decode(base64_string)))
 
 
@@ -892,9 +903,13 @@ def run_viz_generator():
         st.error("Could not convert file to CSV.")
         st.stop()
 
-    # Load & summarize
-    df = pd.read_csv(csv_path)
-    
+    # Load, clean Unnamed/empty columns, then summarize from cleaned CSV
+    df = prepare_dataframe_for_viz(pd.read_csv(csv_path))
+    cleaned_csv_path = os.path.splitext(csv_path)[0] + "_cleaned.csv"
+    df.to_csv(cleaned_csv_path, index=False)
+    csv_path = cleaned_csv_path
+    st.session_state["viz_df"] = df
+
     summary = lida.summarize(csv_path, summary_method="default", textgen_config=textgen_config)
     st.markdown('<div class="section-header">Data Overview</div>', unsafe_allow_html=True)
     
@@ -1001,6 +1016,16 @@ def run_viz_generator():
         # Fallback if somehow completely empty
         if not st.session_state.chart_options:
             st.session_state.chart_options = ["Bar/Column Chart"]
+
+        # Pie/donut of long unique text (e.g. Unnamed description fields) is unreadable
+        st.session_state.chart_options = demote_bad_composition_charts(
+            st.session_state.chart_options,
+            st.session_state.get("viz_df", df),
+        )
+
+        # Force a fresh chart build for this new query
+        st.session_state.pop("last_chart_key", None)
+        st.session_state.pop("chart_raster_b64", None)
             
         print(st.session_state.chart_options)
   
@@ -1034,135 +1059,182 @@ def run_viz_generator():
             key="chart_selected"
         )
 
-        refined = refine_query(query, chart_selected)
-        
-        # Log AI interaction
-        try:
-            db.log_ai_conversation(
-                st.session_state.user_id,
-                query,
-                refined,
-                True,
-                chart_selected
-            )
-        except Exception as e:
-            st.warning(f"Could not log AI conversation: {e}")
-        
-        # Save refined query to chat history
-        save_chat_message(
-            st.session_state.user_id,
-            st.session_state.session_id,
-            "assistant",
-            refined,
-            metadata={
-                "response_time_seconds": 0,
-                "model": "gpt-4o",
-                "chart_type": chart_selected,
-                "source": "viz_generator"
-            }
-        )
-        
-        st.info(f"{refined}")
-            
-        # generate initial chart
-        query_start_time = time.time()
-        charts = lida.visualize(
-            summary=summary,
-            goal=refined,
-            textgen_config=textgen_config,
-            library="seaborn"
-        )
-        ai_response_time = time.time() - query_start_time
-        if charts:
-            base_instructions = [
-                    "Don't change the chart type until explicitly mentioned in the instructions.",
-                    "Ensure that long x-axis or y-axis labels are not truncated. Rotate or wrap them if needed.",
-                    "Adjust the chart margins and layout so that x-axis and y-axis titles are fully visible and not cut off. If required move them closer to the chart.",
-                    "Fit the complete chart within the canvas, including all labels and axis titles.",
-                    "Ensure the x-axis title is fully visible by adjusting bottom padding or layout.",
-                    "If the x-axis labels are long, rotate them or reduce font size to avoid overlap.",
-                    "Use colors that are aesthetically pleasing and have good contrast for accessibility.",
-                    "Maintain appropriate font sizes for readability without crowding the chart.",
-                    "Avoid clutter and minimize grid lines or unnecessary visual elements.",
-                    "Use consistent spacing and alignment for a clean, professional look.",
-                    "Keep the chart simple and easy to understand, avoiding unnecessary complexity.",
-                ]
-            st.session_state["chart_code"] = charts[0].code
-            st.session_state["base_edit_instructions"] = base_instructions
+        chart_key = (query.strip(), chart_selected)
+        should_generate = st.session_state.get("last_chart_key") != chart_key
+
+        if should_generate:
+            with st.spinner("Generating chart..."):
+                try:
+                    refined = refine_query(query, chart_selected)
+
+                    try:
+                        db.log_ai_conversation(
+                            st.session_state.user_id,
+                            query,
+                            refined,
+                            True,
+                            chart_selected
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not log AI conversation: {e}")
+
+                    try:
+                        save_chat_message(
+                            st.session_state.user_id,
+                            st.session_state.session_id,
+                            "assistant",
+                            refined,
+                            metadata={
+                                "response_time_seconds": 0,
+                                "model": "gpt-4o",
+                                "chart_type": chart_selected,
+                                "source": "viz_generator"
+                            }
+                        )
+                    except Exception as e:
+                        print(f"Error saving chat message: {e}")
+
+                    query_start_time = time.time()
+                    charts = lida.visualize(
+                        summary=summary,
+                        goal=refined,
+                        textgen_config=textgen_config,
+                        library="seaborn"
+                    )
+                    # Treemap/sunburst/etc. often return [] with seaborn — fall back to bar
+                    if not charts or not getattr(charts[0], "raster", None):
+                        st.warning(
+                            f"“{chart_selected}” isn’t supported by the chart engine here. "
+                            "Generating a horizontal bar chart instead."
+                        )
+                        charts = lida.visualize(
+                            summary=summary,
+                            goal=f"{refined} — use a horizontal bar chart only (no treemap, sunburst, or pie).",
+                            textgen_config=textgen_config,
+                            library="seaborn"
+                        )
+                    ai_response_time = time.time() - query_start_time
+
+                    if not charts or not getattr(charts[0], "raster", None):
+                        st.error("Chart generation returned no results. Try rephrasing your question or pick Bar/Column Chart.")
+                        st.stop()
+
+                    base_chart = charts[0]
+                    if getattr(base_chart, "error", None) and not getattr(base_chart, "raster", None):
+                        st.error(f"Chart generation failed: {base_chart.error}")
+                        if getattr(base_chart, "code", None):
+                            with st.expander("Generated code"):
+                                st.code(base_chart.code)
+                        st.stop()
+
+                    base_instructions = [
+                        "Don't change the chart type until explicitly mentioned in the instructions.",
+                        "Ensure that long x-axis or y-axis labels are not truncated. Rotate or wrap them if needed.",
+                        "Adjust the chart margins and layout so that x-axis and y-axis titles are fully visible and not cut off. If required move them closer to the chart.",
+                        "Fit the complete chart within the canvas, including all labels and axis titles.",
+                        "Ensure the x-axis title is fully visible by adjusting bottom padding or layout.",
+                        "If the x-axis labels are long, rotate them or reduce font size to avoid overlap.",
+                        "Use colors that are aesthetically pleasing and have good contrast for accessibility.",
+                        "If using a seaborn palette, assign hue to the same variable as x (or the series variable) and set legend=False when appropriate so colors render correctly.",
+                        "Maintain appropriate font sizes for readability without crowding the chart.",
+                        "Avoid clutter and minimize grid lines or unnecessary visual elements.",
+                        "Use consistent spacing and alignment for a clean, professional look.",
+                        "Keep the chart simple and easy to understand, avoiding unnecessary complexity.",
+                        "Never use Unnamed column names in titles; use human-readable field names.",
+                        "Never place long sentence-length strings as pie slice labels.",
+                    ]
+
+                    edit_instructions = base_instructions
+                    if pie_chart_needs_repair(base_chart.code):
+                        edit_instructions = PIE_REPAIR_INSTRUCTIONS + base_instructions[1:]
+                        st.info("Pie charts with long text labels are unreadable — converting to a horizontal bar chart.")
+
+                    final_charts_list = lida.edit(
+                        code=base_chart.code,
+                        summary=summary,
+                        instructions=edit_instructions,
+                        library="seaborn",
+                        textgen_config=textgen_config
+                    )
+
+                    if final_charts_list and getattr(final_charts_list[0], "raster", None):
+                        final_chart = final_charts_list[0]
+                    elif getattr(base_chart, "raster", None):
+                        st.warning("⚠️ Could not apply all stylistic refinements. Displaying the base chart.")
+                        final_chart = base_chart
+                    else:
+                        st.error("Chart image could not be rendered. Try another chart type or rephrase your question.")
+                        st.stop()
+
+                    st.session_state["refined_query"] = refined
+                    st.session_state["chart_code"] = final_chart.code
+                    st.session_state["chart_raster_b64"] = final_chart.raster
+                    st.session_state["base_edit_instructions"] = base_instructions
+                    st.session_state["last_chart_key"] = chart_key
+                    st.session_state["ai_response_time"] = ai_response_time
+                except Exception as e:
+                    st.error(f"Chart generation failed: {e}")
+                    st.stop()
+
+        refined = st.session_state.get("refined_query", "")
+        if refined:
+            st.info(f"{refined}")
+
+        if st.session_state.get("chart_raster_b64"):
             chart_placeholder = st.empty()
-            
-
-            with st.spinner("Generating final chart..."):
-                final_charts_list = lida.edit(
-                    code=charts[0].code,
-                    summary=summary,
-                    instructions=base_instructions,
-                    library="seaborn",
-                    textgen_config=textgen_config
-                )
-                
-                if final_charts_list and len(final_charts_list) > 0:
-                    final_chart = final_charts_list[0]
-                else:
-                    # Fallback to the initial chart if LIDA edit engine fails
-                    st.warning("⚠️ Could not apply all stylistic refinements. Displaying the base chart.")
-                    final_chart = charts[0]
-                    
-            img = base64_to_image(final_chart.raster)
+            img = base64_to_image(st.session_state["chart_raster_b64"])
             chart_placeholder.image(img, use_container_width=True)
-            st.session_state["chart_code"] = final_chart.code
-            
-            # Save generated image to chat storage
-            image_metadata = None
-            try:
-                img_byte_arr = BytesIO()
-                img.save(img_byte_arr, format='PNG')
-                img_data = img_byte_arr.getvalue()
 
-                image_metadata = save_generated_image(
-                    st.session_state.user_id,
-                    st.session_state.session_id,
-                    img_data,
-                    chart_type=chart_selected,
-                    query=query,
-                    image_format="png"
-                )
-                if image_metadata:
-                    st.session_state.interaction_count["visualizations_created"] += 1
-            except Exception as e:
-                print(f"Error saving generated image: {e}")
-            # Log visualization creation
-            try:
-                db.log_visualization(
-                    st.session_state.user_id,
-                    st.session_state.get("current_dataset_id", "unknown"),
-                    chart_selected,
-                    validated.get("All Variables involved", []),
-                    query,
-                    "generated",
-                    image_path=image_metadata.get("path") if image_metadata else None,
-                    source_type='generated'
-                )
-            except Exception as e:
-                print(f"Error logging visualization: {e}")
-                
-                # Log to analytics module (new system) - AI query
-                log_interaction(
-                    st.session_state.get("user_id") or st.session_state.get("admin_id"),
-                    st.session_state.username,
-                    st.session_state.session_id,
-                    "ai_query",
-                    {
-                        "user_query": query[:100],
-                        "response_time_seconds": round(ai_response_time, 2),
-                        "model_used": "GPT-4o",
-                        "chart_type": chart_selected
-                    }
-                )
-                
-                st.session_state.interaction_count["visualizations_created"] += 1
-            except Exception as e:
-                st.warning(f"Could not log visualization: {e}")
+            # Persist artifacts once per successful generation
+            if should_generate:
+                image_metadata = None
+                try:
+                    img_byte_arr = BytesIO()
+                    img.save(img_byte_arr, format='PNG')
+                    img_data = img_byte_arr.getvalue()
+
+                    image_metadata = save_generated_image(
+                        st.session_state.user_id,
+                        st.session_state.session_id,
+                        img_data,
+                        chart_type=chart_selected,
+                        query=query,
+                        image_format="png"
+                    )
+                    if image_metadata:
+                        st.session_state.interaction_count["visualizations_created"] += 1
+                except Exception as e:
+                    print(f"Error saving generated image: {e}")
+
+                try:
+                    db.log_visualization(
+                        st.session_state.user_id,
+                        st.session_state.get("current_dataset_id", "unknown"),
+                        chart_selected,
+                        validated.get("All Variables involved", []),
+                        query,
+                        "generated",
+                        image_path=image_metadata.get("path") if image_metadata else None,
+                        source_type='generated'
+                    )
+                except Exception as e:
+                    print(f"Error logging visualization: {e}")
+
+                try:
+                    log_interaction(
+                        st.session_state.get("user_id") or st.session_state.get("admin_id"),
+                        st.session_state.username,
+                        st.session_state.session_id,
+                        "ai_query",
+                        {
+                            "user_query": query[:100],
+                            "response_time_seconds": round(st.session_state.get("ai_response_time", 0), 2),
+                            "model_used": "GPT-4o",
+                            "chart_type": chart_selected
+                        }
+                    )
+                except Exception as e:
+                    st.warning(f"Could not log visualization: {e}")
 
             # ----- Chart Tweaks -----
             st.markdown('<div class="section-header">✏️ Refine Your Chart</div>', unsafe_allow_html=True)
@@ -1171,7 +1243,6 @@ def run_viz_generator():
                 if "chart_code" not in st.session_state:
                     st.error("Generate a chart first!")
                 else:
-                    # Log chart refinement
                     refine_start_time = time.time()
                     try:
                         db.log_interaction(st.session_state.user_id, "chart_refined", {
@@ -1190,15 +1261,16 @@ def run_viz_generator():
                             library="seaborn",
                             textgen_config=textgen_config
                         )
-                        if not updated_list:
+                        if not updated_list or not getattr(updated_list[0], "raster", None):
                             st.warning("⚠️ Refinement failed. Please try phrasing your request differently.")
                             st.stop()
                         updated = updated_list[0]
                         refine_response_time = time.time() - refine_start_time
+                        st.session_state["chart_code"] = updated.code
+                        st.session_state["chart_raster_b64"] = updated.raster
                         updated_img = base64_to_image(updated.raster)
                         chart_placeholder.image(updated_img, use_container_width=True)
                         
-                        # Log to analytics module - chart refinement
                         try:
                             log_interaction(
                                 st.session_state.get("user_id") or st.session_state.get("admin_id"),
@@ -1210,8 +1282,10 @@ def run_viz_generator():
                                     "response_time_seconds": round(refine_response_time, 2)
                                 }
                             )
-                        except Exception as e:
+                        except Exception:
                             pass
+        else:
+            st.info("Select a chart type to generate a visualization.")
 
 # --------------------- Main App Setup ---------------------
 
