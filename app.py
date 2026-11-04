@@ -1,9 +1,14 @@
 import os
 import json
 import base64
-import pandas as pd
 import xml.etree.ElementTree as ET
 from io import BytesIO
+
+# Streamlit Cloud has no display — set Agg before any pyplot/lida import
+import matplotlib
+matplotlib.use("Agg")
+
+import pandas as pd
 from PIL import Image
 from dotenv import load_dotenv
 import streamlit as st
@@ -446,11 +451,28 @@ def load_json(path: str) -> dict:
 
 def base64_to_image(base64_string: str) -> Image.Image:
     """Convert a base64 encoded string to a PIL Image."""
-    if not base64_string:
+    return Image.open(BytesIO(raster_to_png_bytes(base64_string)))
+
+
+def raster_to_png_bytes(base64_string: str) -> bytes:
+    """Decode LIDA raster base64 to PNG bytes (Cloud-safe for st.image)."""
+    if not base64_string or not isinstance(base64_string, str):
         raise ValueError("Chart image data is empty.")
-    if isinstance(base64_string, str) and base64_string.startswith("data:"):
-        base64_string = base64_string.split(",", 1)[1]
-    return Image.open(BytesIO(base64.b64decode(base64_string)))
+    raw = base64_string.split(",", 1)[1] if base64_string.startswith("data:") else base64_string
+    png = base64.b64decode(raw)
+    if len(png) < 100 or not png.startswith(b"\x89PNG"):
+        raise ValueError("Chart raster is not a valid PNG.")
+    return png
+
+
+def show_chart_image(raster_b64: str, placeholder=None):
+    """Render chart via PNG bytes — avoids broken media placeholders on Streamlit Cloud."""
+    png = raster_to_png_bytes(raster_b64)
+    if placeholder is not None:
+        placeholder.image(png, use_container_width=True)
+    else:
+        st.image(png, use_container_width=True)
+    return png
 
 
 def encode_image(image_path: str) -> str:
@@ -1181,22 +1203,21 @@ def run_viz_generator():
             st.info(f"{refined}")
 
         if st.session_state.get("chart_raster_b64"):
-            chart_placeholder = st.empty()
-            img = base64_to_image(st.session_state["chart_raster_b64"])
-            chart_placeholder.image(img, use_container_width=True)
+            try:
+                png_bytes = show_chart_image(st.session_state["chart_raster_b64"])
+            except Exception as e:
+                st.error(f"Chart image could not be displayed: {e}")
+                st.session_state.pop("chart_raster_b64", None)
+                st.stop()
 
             # Persist artifacts once per successful generation
             if should_generate:
                 image_metadata = None
                 try:
-                    img_byte_arr = BytesIO()
-                    img.save(img_byte_arr, format='PNG')
-                    img_data = img_byte_arr.getvalue()
-
                     image_metadata = save_generated_image(
                         st.session_state.user_id,
                         st.session_state.session_id,
-                        img_data,
+                        png_bytes,
                         chart_type=chart_selected,
                         query=query,
                         image_format="png"
@@ -1268,8 +1289,11 @@ def run_viz_generator():
                         refine_response_time = time.time() - refine_start_time
                         st.session_state["chart_code"] = updated.code
                         st.session_state["chart_raster_b64"] = updated.raster
-                        updated_img = base64_to_image(updated.raster)
-                        chart_placeholder.image(updated_img, use_container_width=True)
+                        try:
+                            show_chart_image(updated.raster)
+                        except Exception as e:
+                            st.error(f"Updated chart could not be displayed: {e}")
+                            st.stop()
                         
                         try:
                             log_interaction(
