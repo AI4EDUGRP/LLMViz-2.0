@@ -12,7 +12,6 @@ import pandas as pd
 from PIL import Image
 from dotenv import load_dotenv
 import streamlit as st
-from streamlit_option_menu import option_menu
 from lida import Manager, TextGenerationConfig, llm
 from openai import OpenAI
 from database import get_db
@@ -465,23 +464,29 @@ def raster_to_png_bytes(base64_string: str) -> bytes:
     return png
 
 
-def show_chart_image(raster_b64: str, placeholder=None):
-    """
-    Render chart as a data-URI <img>.
-    Streamlit Cloud often shows a broken image / "0" with st.image() because
-    media is stored in-memory per replica (MediaFileHandler: Missing file).
-    Embedding base64 bypasses that media manager entirely.
-    """
-    png = raster_to_png_bytes(raster_b64)
+def show_png_bytes(png: bytes, alt: str = "Chart"):
+    """Embed PNG as data-URI — bypasses Streamlit Cloud MediaFileHandler '0' bug."""
+    if not png or not png.startswith(b"\x89PNG"):
+        raise ValueError("Not a valid PNG.")
     b64 = base64.b64encode(png).decode("ascii")
-    html = (
+    st.markdown(
         f'<img src="data:image/png;base64,{b64}" '
-        f'style="width:100%;height:auto;display:block;" '
-        f'alt="Generated chart"/>'
+        f'style="width:100%;height:auto;display:block;" alt="{alt}"/>',
+        unsafe_allow_html=True,
     )
-    # placeholder unused on purpose — st.empty().markdown has the same Cloud media issues
-    st.markdown(html, unsafe_allow_html=True)
     return png
+
+
+def show_chart_image(raster_b64: str, placeholder=None):
+    """Render LIDA raster via data-URI (Cloud-safe)."""
+    return show_png_bytes(raster_to_png_bytes(raster_b64), alt="Generated chart")
+
+
+def show_pil_image(image: Image.Image, alt: str = "Uploaded image"):
+    """Render a PIL image via data-URI (Cloud-safe)."""
+    buf = BytesIO()
+    image.convert("RGB").save(buf, format="PNG")
+    return show_png_bytes(buf.getvalue(), alt=alt)
 
 
 def encode_image(image_path: str) -> str:
@@ -690,10 +695,11 @@ def run_viz_evaluator():
             st.error(f"Error processing the uploaded image: {e}")
             return
         
-        # Save the uploaded image to a temporary file
+        # Save for evaluator LLM path; preview via data-URI (Cloud-safe)
         temp_image_path = "output_image.png"
         image.save(temp_image_path)
-        st.image(temp_image_path, caption="Uploaded Visualization", use_container_width=True)
+        st.caption("Uploaded Visualization")
+        show_pil_image(image, alt="Uploaded Visualization")
         
         visualization_quality_rules = load_json("quality_rules.json").get("VISUALIZATION_QUALITY_RULES", {})
         
@@ -1339,25 +1345,21 @@ st.markdown(
         --bg-hero-end: #047857;     /* Emerald 700 */
     }
 
-    /* Sidebar menu overrides */
-    .sidebar .menu-container {
-        padding: 1rem 0;
+    /* Sidebar radio nav (Cloud-safe; no Bootstrap icon font) */
+    section[data-testid="stSidebar"] div[role="radiogroup"] label {
+        padding: 0.55rem 0.85rem !important;
+        margin: 0.25rem 0 !important;
+        border-radius: 0.5rem !important;
+        font-size: 1.05rem !important;
+        background: transparent !important;
     }
-    .sidebar .nav-link {
-        font-size: 1rem !important;
-        color: var(--brand-primary) !important;
-        margin: 0.5rem 0 !important;
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+        background: #F1F1F1 !important;
     }
-    .sidebar .nav-link:hover {
-        background-color: rgba(79, 70, 229, 0.1) !important;
-    }
-    .sidebar .nav-link-selected {
-        background-color: var(--brand-primary) !important;
-        color: var(--text-light) !important;
-    }
-    .sidebar .icon {
-        color: var(--brand-primary) !important;
-        font-size: 1.25rem !important;
+    section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+        background: #0066CC !important;
+        color: #FFFFFF !important;
     }
 
     /* (Rest of your Home page CSS here…) */
@@ -1405,63 +1407,20 @@ with st.sidebar:
 </div>
 """, unsafe_allow_html=True)
 
-    # Build menu options based on role
-    menu_options = ["Home", "Viz Generator", "Viz Evaluator"]
-    menu_icons = ["house-fill", "bar-chart-fill", "check2-circle"]
-    
-    # Admin sees Analytics option
+    # Emoji labels — Bootstrap icons from option_menu often fail on Streamlit Cloud (empty boxes)
+    menu_options = ["🏠 Home", "📊 Viz Generator", "✅ Viz Evaluator"]
     if st.session_state.get("role") == "admin":
-        menu_options.append("Analytics Dashboard")
-        menu_icons.append("graph-up")
-    
-    # Add logout option
-    menu_options.append("Logout")
-    menu_icons.append("box-arrow-right")
-    
-    menu = option_menu(
-    menu_title=None,
-    options=menu_options,
-    icons=menu_icons,
-    default_index=0,
-    orientation="vertical",
-    styles={
-        "container": {
-            "padding": "1rem 0.5rem",
-            "background-color": "#FFFFFF",
-            "border-right": "1px solid #E3E3E3"
-        },
-        # default icon color
-        "nav-link-icon": {
-            "color": "#0066CC",
-            "font-size": "1.3rem",
-            "margin": "0 0.5rem 0 0"
-        },
-        # each link (text)
-        "nav-link": {
-            "font-size": "1.05rem",
-            "text-align": "left",
-            "margin": "0.25rem 0",
-            "padding": "0.5rem 1rem",
-            "border-radius": "0.5rem",
-            "color": "#333333"
-        },
-        # hover state (link + icon both pick this up)
-        "nav-link:hover": {
-            "background-color": "#F1F1F1",
-            "color": "#000000"
-        },
-        # selected link background + text
-        "nav-link-selected": {
-            "background-color": "#0066CC",
-            "color": "#FFFFFF",
-            "font-weight": "bold"
-        },
-        # and here’s the magic – selected icon turns white
-        "nav-link-selected-icon": {
-            "color": "#FFFFFF"
-        }
-    }
-)
+        menu_options.append("📈 Analytics Dashboard")
+    menu_options.append("🚪 Logout")
+
+    menu_raw = st.radio(
+        "Navigation",
+        menu_options,
+        label_visibility="collapsed",
+        key="sidebar_nav",
+    )
+    # Strip emoji prefix for existing page routing
+    menu = menu_raw.split(" ", 1)[-1] if " " in menu_raw else menu_raw
 
 # --------------------- Home Page Renderer ---------------------
 
