@@ -3,10 +3,13 @@ Analytics and usage tracking module for LLMViz using Supabase.
 Tracks user interactions, queries, and session statistics.
 """
 
-import json
 import csv
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+import io
+import json
+import re
+import zipfile
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple
 from supabase_client import get_supabase_client
 
 
@@ -257,3 +260,252 @@ def export_sessions_to_json(filename: str, sessions_data: List[Dict],
     except Exception as e:
         print(f"Error exporting to JSON: {e}")
         return False
+
+
+def _parse_day(ts: str | None) -> date | None:
+    if not ts or not isinstance(ts, str):
+        return None
+    raw = ts.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(raw).date()
+    except Exception:
+        try:
+            return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+
+def _safe_folder_name(name: str) -> str:
+    cleaned = re.sub(r"[^\w.\-]+", "_", (name or "unknown").strip())
+    return (cleaned[:80] or "unknown").strip("_")
+
+
+def _session_in_date_range(session: Dict, start: date, end: date) -> bool:
+    for key in ("start_time", "end_time"):
+        d = _parse_day(session.get(key))
+        if d and start <= d <= end:
+            return True
+    for event in session.get("interactions", []) or []:
+        d = _parse_day(event.get("timestamp"))
+        if d and start <= d <= end:
+            return True
+    return False
+
+
+def _chat_in_date_range(chat_data: Dict, start: date, end: date) -> bool:
+    d = _parse_day(chat_data.get("created_at"))
+    if d and start <= d <= end:
+        return True
+    for msg in chat_data.get("messages", []) or []:
+        d = _parse_day(msg.get("timestamp"))
+        if d and start <= d <= end:
+            return True
+    for img in chat_data.get("generated_images", []) or []:
+        d = _parse_day(img.get("generated_at") or img.get("created_at"))
+        if d and start <= d <= end:
+            return True
+    return False
+
+
+def _download_image_bytes(client, image_meta: Dict) -> Tuple[str, bytes] | None:
+    """Fetch chart image bytes from Supabase Storage or public URL."""
+    filename = image_meta.get("filename") or ""
+    path = image_meta.get("path") or ""
+    image_id = image_meta.get("id") or "chart"
+    ext = "jpeg"
+    if "." in filename:
+        ext = filename.rsplit(".", 1)[-1]
+    elif path.lower().endswith(".png"):
+        ext = "png"
+
+    # Prefer storage path
+    if filename and not str(filename).startswith("http"):
+        try:
+            data = client.storage.from_("images").download(filename)
+            if data:
+                return f"chart_{image_id}.{ext}", data
+        except Exception as e:
+            print(f"Storage download failed for {filename}: {e}")
+
+    url = path if str(path).startswith("http") else None
+    if url:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                data = resp.read()
+                if data:
+                    return f"chart_{image_id}.{ext}", data
+        except Exception as e:
+            print(f"URL download failed for {url}: {e}")
+    return None
+
+
+def build_dated_student_export_zip(start: date, end: date) -> Tuple[bytes, Dict[str, int]]:
+    """
+    Build a ZIP of student activity for [start, end] (inclusive).
+
+    Layout:
+      summary.csv
+      <StudentName>/
+        overview.csv
+        session_<id>/
+          analytics.json
+          chat_history.json
+          images/...
+    """
+    if end < start:
+        start, end = end, start
+
+    from chat_storage import get_chat_history
+    from auth import get_all_user_profiles
+
+    client = get_supabase_client()
+    profiles = get_all_user_profiles()
+    all_sessions = get_all_sessions()
+
+    # user_id -> list of analytics sessions in range
+    sessions_by_user: Dict[str, List[Dict]] = {}
+    for s in all_sessions:
+        if not _session_in_date_range(s, start, end):
+            continue
+        uid = s.get("user_id") or "unknown"
+        sessions_by_user.setdefault(uid, []).append(s)
+
+    # Also pull chats in range (covers users with chats but thin analytics)
+    chats_by_user: Dict[str, List[Dict]] = {}
+    try:
+        chat_rows = client.table("chats").select("user_id, session_id, messages").execute()
+        for row in chat_rows.data or []:
+            chat_data = row.get("messages") or {}
+            if not isinstance(chat_data, dict):
+                continue
+            if not _chat_in_date_range(chat_data, start, end):
+                continue
+            uid = row.get("user_id") or chat_data.get("user_id") or "unknown"
+            chat_data.setdefault("session_id", row.get("session_id"))
+            chat_data.setdefault("user_id", uid)
+            chats_by_user.setdefault(uid, []).append(chat_data)
+    except Exception as e:
+        print(f"Error loading chats for export: {e}")
+
+    user_ids = sorted(set(sessions_by_user) | set(chats_by_user))
+    buf = io.BytesIO()
+    summary_rows = []
+    image_count = 0
+
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for uid in user_ids:
+            display = profiles.get(uid) or (sessions_by_user.get(uid) or [{}])[0].get("username")
+            if not display and chats_by_user.get(uid):
+                display = chats_by_user[uid][0].get("username")
+            display = display or uid
+            folder = _safe_folder_name(str(display))
+
+            user_sessions = sessions_by_user.get(uid, [])
+            user_chats = chats_by_user.get(uid, [])
+
+            # overview.csv per student
+            overview = io.StringIO()
+            ow = csv.DictWriter(
+                overview,
+                fieldnames=[
+                    "user_id", "username", "session_id", "start_time", "end_time",
+                    "duration_minutes", "queries_made", "charts_generated",
+                    "datasets_uploaded", "interaction_count",
+                ],
+            )
+            ow.writeheader()
+            for s in user_sessions:
+                metrics = s.get("metrics") or {}
+                ow.writerow({
+                    "user_id": uid,
+                    "username": display,
+                    "session_id": s.get("session_id", ""),
+                    "start_time": s.get("start_time", ""),
+                    "end_time": s.get("end_time", ""),
+                    "duration_minutes": s.get("duration_minutes", 0),
+                    "queries_made": metrics.get("queries_made", 0),
+                    "charts_generated": metrics.get("charts_generated", 0),
+                    "datasets_uploaded": metrics.get("datasets_uploaded", 0),
+                    "interaction_count": len(s.get("interactions") or []),
+                })
+            zf.writestr(f"{folder}/overview.csv", overview.getvalue())
+
+            # Index chats by session
+            chat_by_sid = {c.get("session_id"): c for c in user_chats if c.get("session_id")}
+            session_ids = set(s.get("session_id") for s in user_sessions if s.get("session_id"))
+            session_ids |= set(chat_by_sid.keys())
+
+            student_images = 0
+            for sid in sorted(session_ids):
+                if not sid:
+                    continue
+                sess_folder = f"{folder}/session_{_safe_folder_name(str(sid))}"
+                analytics_sess = next((s for s in user_sessions if s.get("session_id") == sid), None)
+                if analytics_sess:
+                    zf.writestr(
+                        f"{sess_folder}/analytics.json",
+                        json.dumps(analytics_sess, indent=2),
+                    )
+                chat_data = chat_by_sid.get(sid) or get_chat_history(uid, sid)
+                if chat_data:
+                    zf.writestr(
+                        f"{sess_folder}/chat_history.json",
+                        json.dumps(chat_data, indent=2),
+                    )
+                    for img_meta in chat_data.get("generated_images") or []:
+                        fetched = _download_image_bytes(client, img_meta)
+                        if not fetched:
+                            continue
+                        fname, data = fetched
+                        zf.writestr(f"{sess_folder}/images/{fname}", data)
+                        student_images += 1
+                        image_count += 1
+
+            summary_rows.append({
+                "username": display,
+                "user_id": uid,
+                "sessions": len(session_ids),
+                "analytics_sessions": len(user_sessions),
+                "chat_sessions": len(user_chats),
+                "images": student_images,
+            })
+
+        # Root summary
+        summary_io = io.StringIO()
+        sw = csv.DictWriter(
+            summary_io,
+            fieldnames=["username", "user_id", "sessions", "analytics_sessions", "chat_sessions", "images"],
+        )
+        sw.writeheader()
+        for row in summary_rows:
+            sw.writerow(row)
+        zf.writestr("summary.csv", summary_io.getvalue())
+
+        # Flat interactions CSV for quick spreadsheet use
+        flat = io.StringIO()
+        fw = csv.DictWriter(
+            flat,
+            fieldnames=["username", "user_id", "session_id", "timestamp", "action", "details"],
+        )
+        fw.writeheader()
+        for uid in user_ids:
+            display = profiles.get(uid) or uid
+            for s in sessions_by_user.get(uid, []):
+                for i in s.get("interactions") or []:
+                    fw.writerow({
+                        "username": display,
+                        "user_id": uid,
+                        "session_id": s.get("session_id", ""),
+                        "timestamp": i.get("timestamp", ""),
+                        "action": i.get("action", ""),
+                        "details": json.dumps(i.get("details", "")),
+                    })
+        zf.writestr("all_interactions.csv", flat.getvalue())
+
+    stats = {
+        "students": len(user_ids),
+        "sessions": sum(len(v) for v in sessions_by_user.values()),
+        "images": image_count,
+    }
+    return buf.getvalue(), stats

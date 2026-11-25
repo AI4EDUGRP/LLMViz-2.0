@@ -1804,6 +1804,47 @@ def render_analytics():
         st.info("No interaction data available yet.")
     
     st.markdown("---")
+    st.subheader("⬇️ Export student logs by date")
+    st.markdown(
+        "Pick a date range to download a **ZIP**: one folder per student (sessions, chat JSON, chart images), "
+        "plus `summary.csv` and `all_interactions.csv`."
+    )
+    from datetime import date as _date
+    exp_col1, exp_col2, exp_col3 = st.columns([1, 1, 1])
+    with exp_col1:
+        export_start = st.date_input("Start date", value=_date.today().replace(day=1), key="export_start")
+    with exp_col2:
+        export_end = st.date_input("End date", value=_date.today(), key="export_end")
+    with exp_col3:
+        st.write("")
+        st.write("")
+        do_export = st.button("Build export ZIP", type="primary", use_container_width=True)
+
+    if do_export:
+        with st.spinner("Collecting student sessions, chats, and images…"):
+            try:
+                from analytics import build_dated_student_export_zip
+                zip_bytes, exp_stats = build_dated_student_export_zip(export_start, export_end)
+                if exp_stats.get("students", 0) == 0:
+                    st.warning("No student activity found in that date range.")
+                else:
+                    fname = f"VisualStats_export_{export_start}_to_{export_end}.zip"
+                    st.success(
+                        f"Ready: **{exp_stats['students']}** students, "
+                        f"**{exp_stats['sessions']}** analytics sessions, "
+                        f"**{exp_stats['images']}** images."
+                    )
+                    st.download_button(
+                        label="Download ZIP",
+                        data=zip_bytes,
+                        file_name=fname,
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
+            except Exception as e:
+                st.error(f"Export failed: {e}")
+
+    st.markdown("---")
     st.subheader("👤 Detailed User Analysis")
     st.markdown("Select a user to review their specific questions asked and visualizations generated.")
     
